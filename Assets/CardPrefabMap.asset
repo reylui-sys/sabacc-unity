@@ -1,0 +1,167 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: c62c7e1e39179c94b9f373bfeb7f5ffa, type: 3}
+  m_Name: CardPrefabMap
+  m_EditorClassIdentifier: 
+  cardPrefabs:
+  - cardId: Monedas_1
+    prefab: {fileID: 3106499645487078337, guid: 31382f0a4030dde46b039b1a596c7273, type: 3}
+  - cardId: Monedas_2
+    prefab: {fileID: 1309986937213195217, guid: 76ea724c17cba1c4e8d2873869c211ff, type: 3}
+  - cardId: Monedas_3
+    prefab: {fileID: 7966700840578756559, guid: 878b76d8e3793bc459f48c7e959a14d4, type: 3}
+  - cardId: Monedas_4
+    prefab: {fileID: 452306373526094738, guid: 011380a30676deb4e9232c1ba55657a6, type: 3}
+  - cardId: Monedas_5
+    prefab: {fileID: 7809825163381071331, guid: 1b2071ef96667ca4794a118bb71b4cdd, type: 3}
+  - cardId: Monedas_6
+    prefab: {fileID: 5761920018284132327, guid: e0172c6240154e64896f0739c38a26a8, type: 3}
+  - cardId: Monedas_7
+    prefab: {fileID: 8791827961430457381, guid: 9c805d3798761ce4b9e03d5b4bb9b7e5, type: 3}
+  - cardId: Monedas_8
+    prefab: {fileID: 8908660392971757927, guid: 17c7e62c3131a1e44b611a6eb4909f70, type: 3}
+  - cardId: Monedas_9
+    prefab: {fileID: 8694263942014199893, guid: bfd2852ba748629428d9a2811333030d, type: 3}
+  - cardId: Monedas_10
+    prefab: {fileID: 4713626393968794098, guid: adb7cfc16f990964cbe580efcb69b4b9, type: 3}
+  - cardId: Monedas_11
+    prefab: {fileID: 8866837788654793651, guid: 92f49864827ad144f8b678ca254c7dc8, type: 3}
+  - cardId: Monedas_Amante
+    prefab: {fileID: 8307222807201017090, guid: a9b570629ccb5df4d8e83675c8669479, type: 3}
+  - cardId: Monedas_As
+    prefab: {fileID: 6617535523836097248, guid: 69de183ddeeb7de478bddfd416938ae4, type: 3}
+  - cardId: Monedas_Comandante
+    prefab: {fileID: 3169900239628605472, guid: 1c388cd6ab3f70e46b22198847787031, type: 3}
+  - cardId: Monedas_Maestro
+    prefab: {fileID: 4970511083620714737, guid: a8d6b8561b372a44d90fa6fa68308257, type: 3}
+  - cardId: Frascos_1
+    prefab: {fileID: 6900912555098692576, guid: ebcbc60a7c159b94a89b621f8fe03a6d, type: 3}
+  - cardId: Frascos_2
+    prefab: {fileID: 8550331322415884078, guid: 2f867ac9293ffbb45b727f877e25efd9, type: 3}
+  - cardId: Frascos_3
+    prefab: {fileID: 7099328132459720060, guid: 091c1fe239a9b374cbe2151ae1e07518, type: 3}
+  - cardId: Frascos_4
+    prefab: {fileID: 8670682909313028877, guid: 480674a6c58289846afe2fef003bbe7c, type: 3}
+  - cardId: Frascos_5
+    prefab: {fileID: 403121842419038625, guid: f6f0f266fef8aa04c88a2452c2a464f4, type: 3}
+  - cardId: Frascos_6
+    prefab: {fileID: 7605572752858174916, guid: 5bcbf44748c14044680ef0c2784fb986, type: 3}
+  - cardId: Frascos_7
+    prefab: {fileID: 4180414096998829626, guid: 4cf37839a07fb55489a7a1e2fccd1bff, type: 3}
+  - cardId: Frascos_8
+    prefab: {fileID: 1208677823218025852, guid: 54209a7c90664834eb58625654001a09, type: 3}
+  - cardId: Frascos_9
+    prefab: {fileID: 5046170681255322766, guid: 738917718c07edc4a9c276658dae1e27, type: 3}
+  - cardId: Frascos_10
+    prefab: {fileID: 8018724243070817715, guid: 7fa30d8e01895e44ca1f155d510a06e2, type: 3}
+  - cardId: Frascos_11
+    prefab: {fileID: 2772005748198084423, guid: a7c4f3a06efb1c64399f621858f431a9, type: 3}
+  - cardId: Frascos_Amante
+    prefab: {fileID: 7688447147575946209, guid: 99da3ea1753459944b22df1a734d23f9, type: 3}
+  - cardId: Frascos_As
+    prefab: {fileID: 6502493599212547213, guid: d81ace71ffe6cd74cbaa6f3d1170ab9e, type: 3}
+  - cardId: Frascos_Comandante
+    prefab: {fileID: 2173246280554099263, guid: 88727ebcf1bd58c4380d1a8ffefb2809, type: 3}
+  - cardId: Frascos_Maestro
+    prefab: {fileID: 5665239287065959645, guid: 708704aaed28c0845bf121ceb319cbda, type: 3}
+  - cardId: Sables_1
+    prefab: {fileID: 4727310132806074515, guid: de356ee9085d2b544a061fd21c040a61, type: 3}
+  - cardId: Sables_2
+    prefab: {fileID: 8487451719087910139, guid: 833d790575f425646913c002202753e2, type: 3}
+  - cardId: Sables_3
+    prefab: {fileID: 6824156566484376245, guid: d86c2ccee3a319545b23762c5f87519f, type: 3}
+  - cardId: Sables_4
+    prefab: {fileID: 6065849134362914257, guid: 0d445ea311d8d914f8a9c740e1d53711, type: 3}
+  - cardId: Sables_5
+    prefab: {fileID: 1797726704090567748, guid: 2c283da9b0a393a4e8c7082e5f0e8250, type: 3}
+  - cardId: Sables_6
+    prefab: {fileID: 573601006564034356, guid: 0e97448ed0f4d284ea7f905e6e12762f, type: 3}
+  - cardId: Sables_7
+    prefab: {fileID: 4632813085144544811, guid: 5233cd2d28581be4db5c25aa671b0761, type: 3}
+  - cardId: Sables_8
+    prefab: {fileID: 8379212265218588030, guid: e8bd998cf8ea0694fab57f89215c98d9, type: 3}
+  - cardId: Sables_9
+    prefab: {fileID: 2620576327498215108, guid: 01a555dfc2330394a824d1ee8dc438c2, type: 3}
+  - cardId: Sables_10
+    prefab: {fileID: 1364197041707434518, guid: 2876661773eee564dab39ca1f471eeb6, type: 3}
+  - cardId: Sables_11
+    prefab: {fileID: 8516026468614757310, guid: 2eb45731adb8a084ab143cf913b8cf25, type: 3}
+  - cardId: Sables_Amante
+    prefab: {fileID: 2479863732944146382, guid: 5cc5be82409de5d498885f532c4fa268, type: 3}
+  - cardId: Sables_As
+    prefab: {fileID: 5975650425758547895, guid: 0a9ce0db3d52f294da660159636eea15, type: 3}
+  - cardId: Sables_Comandante
+    prefab: {fileID: 7392623237813629252, guid: d361c397d94533d4eba2f3457a23bbb4, type: 3}
+  - cardId: Sables_Maestro
+    prefab: {fileID: 5058625628360548089, guid: a659bc52289449f43aadb5b52c5d873a, type: 3}
+  - cardId: Bastones_1
+    prefab: {fileID: 8662360661285863113, guid: e9ac1d0dfbe16ee44966d572aec16bdd, type: 3}
+  - cardId: Bastones_2
+    prefab: {fileID: 711491091542050748, guid: 6d04981a5ace9e2428ab8dac9ed20f25, type: 3}
+  - cardId: Bastones_3
+    prefab: {fileID: 1385339875643064294, guid: 7dc1a88ccc11bca439c31b2fef202393, type: 3}
+  - cardId: Bastones_4
+    prefab: {fileID: 4549181755945991309, guid: a822f19198909104b8fee1424b0d9e93, type: 3}
+  - cardId: Bastones_5
+    prefab: {fileID: 4463828231290802012, guid: 6edb248b452eb554587aac0f82b446fb, type: 3}
+  - cardId: Bastones_6
+    prefab: {fileID: 8401151063953586920, guid: 964ec74c1326f3648944cf1d301492ed, type: 3}
+  - cardId: Bastones_7
+    prefab: {fileID: 3135720358458831151, guid: 326395be5dd61cd49ae0599838e6786e, type: 3}
+  - cardId: Bastones_8
+    prefab: {fileID: 3063032122571869222, guid: e7d1e1212f661ee42bfbcb4be3795573, type: 3}
+  - cardId: Bastones_9
+    prefab: {fileID: 2360877713686992976, guid: 5006c58437d54984ca52ea41001093f5, type: 3}
+  - cardId: Bastones_10
+    prefab: {fileID: 4957213397564590460, guid: d472d230a35673a419a50fdad5eb093f, type: 3}
+  - cardId: Bastones_11
+    prefab: {fileID: 6140611218366138650, guid: 5c916d518172749418e8f0e1b6dbf432, type: 3}
+  - cardId: Bastones_Amante
+    prefab: {fileID: 5167491942769343817, guid: 2659a4ad2d730f449bdb00fe2a4cb414, type: 3}
+  - cardId: Bastones_As
+    prefab: {fileID: 7064699400485399093, guid: 8cc804aaaf927ee489efdca5ea7b1a20, type: 3}
+  - cardId: Bastones_Comandante
+    prefab: {fileID: 126865059454918923, guid: a45a3ff56f46fd0469e20875387f5b04, type: 3}
+  - cardId: Bastones_Maestro
+    prefab: {fileID: 5491336526997698864, guid: 672f20a62cf14ed40b7b3985749be5b1, type: 3}
+  - cardId: El_Equilibrio
+    prefab: {fileID: 4498953028211280205, guid: d6c6200e49a4d8d4e9f71033410b72fb, type: 3}
+  - cardId: El_Equilibrio_2
+    prefab: {fileID: 5787189163067633245, guid: d63293c2adbb76949954be40ed6d8fdc, type: 3}
+  - cardId: El_Idiota
+    prefab: {fileID: 773028827395716098, guid: 84f95fce6953cfc4ca1cee5a6cf53a22, type: 3}
+  - cardId: El_Idiota_2
+    prefab: {fileID: 4459863900192034554, guid: 595188082f4a02c42bcbe3d229e657ee, type: 3}
+  - cardId: El_Maligno
+    prefab: {fileID: 9144845308746508901, guid: a4aebb3f1683f934cacf6c31826f6254, type: 3}
+  - cardId: El_Maligno_2
+    prefab: {fileID: 3261990044534787280, guid: 704d328bbb007bc44ab5f361d7fe8c59, type: 3}
+  - cardId: Fallecimiento
+    prefab: {fileID: 177043931560818349, guid: 0c7f3baa314816e45aa61927b46ac7a1, type: 3}
+  - cardId: Fallecimiento_2
+    prefab: {fileID: 3792307619043595606, guid: b090bc8b7ff6114448190793d1f64d35, type: 3}
+  - cardId: La_Estrella
+    prefab: {fileID: 7174046390457054022, guid: 443ad2be7bf36cc4e8a3fb030560beb9, type: 3}
+  - cardId: La_Estrella_2
+    prefab: {fileID: 6111970274125537819, guid: f5eb9844f6a152747913b47f4725a024, type: 3}
+  - cardId: Moderacion
+    prefab: {fileID: 4961755493668755350, guid: b9ea4abb342a8b74f8d68f2cda1120c6, type: 3}
+  - cardId: Moderacion_2
+    prefab: {fileID: 6979575700414379849, guid: e078778c24ee05046b7a3a77ef554441, type: 3}
+  - cardId: Reina_del_Aire_y_Oscuridad
+    prefab: {fileID: 4437220731012872367, guid: 008de64b6a591ba4c9d457f73faceb96, type: 3}
+  - cardId: Reina_del_Aire_y_Oscuridad_2
+    prefab: {fileID: 4102535526998640896, guid: 5f2aa63adfd799c4e981e529fd058bea, type: 3}
+  - cardId: Resistencia
+    prefab: {fileID: 2666620514455586125, guid: fa6b6a1a8ba561a449db57afe39bb182, type: 3}
+  - cardId: Resistencia_2
+    prefab: {fileID: 7980915402854060463, guid: 9b78aa1547775b74eb222e701c43259f, type: 3}
