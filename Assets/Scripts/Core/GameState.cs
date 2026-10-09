@@ -20,6 +20,8 @@ public class GameState
     private GamePhase currentPhase;
     private int currentRound;
     private bool isRoundActive;
+    private int currentHighestBet;
+    private int callerIndex = -1;
 
     // ===== PROPIEDADES PÚBLICAS (SOLO LECTURA) =====
 
@@ -90,6 +92,28 @@ public class GameState
     {
         get { return isRoundActive; }
         set { isRoundActive = value; }
+    }
+
+    /// <summary>Apuesta más alta de la ronda de apuestas actual (lo que hay que igualar)</summary>
+    public int CurrentHighestBet
+    {
+        get { return currentHighestBet; }
+        set { currentHighestBet = value; }
+    }
+
+    /// <summary>Asiento del jugador que hizo CALL en esta fase, o -1 si nadie</summary>
+    public int CallerIndex
+    {
+        get { return callerIndex; }
+        set { callerIndex = value; }
+    }
+
+    public bool SomeoneCalled => callerIndex >= 0;
+
+    /// <summary>Cuánto le falta a un jugador para igualar la apuesta más alta</summary>
+    public int AmountToCall(Player player)
+    {
+        return currentHighestBet - player.CurrentBet;
     }
 
     // ===== CONSTRUCTOR =====
