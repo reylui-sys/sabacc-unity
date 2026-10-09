@@ -38,6 +38,7 @@ public class GameLogic
         state.CurrentRound++;
         state.MainDeck = new Deck(SabaccCardDefinitions.CreateFullDeck());
         state.MainDeck.Shuffle();
+        state.DeckIsKnown = true; // quien inicializa la ronda es la autoridad: conoce el mazo
         state.DiscardPile = new DiscardPile();
         state.HandPot = 0;
         // NO resetear SabaccPot - persiste entre rondas
@@ -113,111 +114,21 @@ public class GameLogic
     // ===== SHIFTING (crucial para multijugador) =====
 
     /// <summary>
-    /// Aplica shifting a las cartas de los jugadores activos.
-    /// Devuelve lista de cambios para sincronizar animaciones.
-    /// Las cartas se intercambian con cartas del mazo restante.
+    /// Aplica un shift directamente sobre el estado (atajo para la autoridad y los tests).
+    /// Usa el mismo camino que la partida en red: GameEngine.PlanShifting decide los
+    /// cambios y GameReducer los aplica. Devuelve los cambios ocurridos.
     /// </summary>
-    /// <param name="state">Estado del juego</param>
-    /// <param name="shiftProbability">Probabilidad de que cada carta cambie (0.2 a 0.33)</param>
-    /// <returns>Lista de ShiftResult con los cambios ocurridos</returns>
     public List<ShiftResult> ApplyShifting(GameState state, float shiftProbability)
     {
-        List<ShiftResult> changes = new List<ShiftResult>();
-        
-        // El pool de cartas disponibles para el shifting es el mazo restante
-        List<SabaccCard> availableCards = new List<SabaccCard>(state.MainDeck.GetCards());
-        
-        CoreLog.Info($"[ApplyShifting] Pool inicial: {availableCards.Count} cartas disponibles del mazo");
+        CardsShifted shifted = GameEngine.PlanShifting(state, shiftProbability, _random, ShiftKind.First);
+        GameReducer.Apply(state, shifted);
 
-        // Aplica shifting a cada jugador activo
-        for (int playerIndex = 0; playerIndex < state.Players.Count; playerIndex++)
-        {
-            Player player = state.Players[playerIndex];
-            
-            if (player.State != PlayerState.Active)
-                continue;
-
-            List<SabaccCard> currentCards = player.Hand.GetCards();
-
-            for (int cardIndex = 0; cardIndex < currentCards.Count; cardIndex++)
-            {
-                SabaccCard card = currentCards[cardIndex];
-                
-                // Carta protegida: no cambia
-                if (card.IsProtected())
-                {
-                    CoreLog.Info($"[ApplyShifting] Jugador {playerIndex}, carta {cardIndex}: PROTEGIDA, no cambia");
-                    continue;
-                }
-                
-                // Aplicar probabilidad de shifting
-                double roll = _random.NextDouble();
-                CoreLog.Info($"[ApplyShifting] Jugador {playerIndex}, carta {cardIndex}: roll={roll:F2}, prob={shiftProbability:F2}");
-                
-                if (roll < shiftProbability)
-                {
-                    if (availableCards.Count > 0)
-                    {
-                        // Seleccionar carta aleatoria del pool
-                        int randomIndex = _random.Next(availableCards.Count);
-                        SabaccCard newCard = availableCards[randomIndex];
-                        
-                        // Registrar el cambio
-                        changes.Add(new ShiftResult(
-                            playerIndex,
-                            cardIndex,
-                            card.GetCardId(),
-                            newCard.GetCardId()
-                        ));
-                        
-                        CoreLog.Info($"[ApplyShifting] ¡CAMBIO! Jugador {playerIndex}, carta {cardIndex}: {card.Name} ({card.GetCardId()}) -> {newCard.Name} ({newCard.GetCardId()})");
-                        
-                        // Intercambiar: quitar nueva del pool, añadir vieja al pool
-                        availableCards.RemoveAt(randomIndex);
-                        availableCards.Add(card);
-                        
-                        // Actualizar la mano del jugador
-                        player.Hand.ReplaceCardAt(cardIndex, newCard);
-                        
-                        // Actualizar el mazo también (quitar la carta nueva, añadir la vieja)
-                        state.MainDeck.RemoveCard(newCard);
-                        state.MainDeck.AddCardToBottom(card);
-                    }
-                    else
-                    {
-                        CoreLog.Info($"[ApplyShifting] Jugador {playerIndex}, carta {cardIndex}: pool vacío, no puede cambiar");
-                    }
-                }
-            }
-        }
+        var changes = new List<ShiftResult>();
+        foreach (CardShift shift in shifted.Shifts)
+            changes.Add(new ShiftResult(shift.PlayerIndex, shift.CardIndex, shift.OldCardId, shift.NewCardId));
 
         CoreLog.Info($"[ApplyShifting] Total de cartas cambiadas: {changes.Count}");
         return changes;
-    }
-
-    /// <summary>
-    /// Aplica cambios de shifting específicos (para sincronización en clientes).
-    /// </summary>
-    public void ApplyShiftChanges(GameState state, List<ShiftResult> changes)
-    {
-        foreach (var change in changes)
-        {
-            if (change.PlayerIndex < state.Players.Count)
-            {
-                Player player = state.Players[change.PlayerIndex];
-                List<SabaccCard> cards = player.Hand.GetCards();
-                
-                if (change.CardIndex < cards.Count)
-                {
-                    SabaccCard newCard = SabaccCardDefinitions.GetCardById(change.NewCardId);
-                    if (newCard != null)
-                    {
-                        // Reemplazar la carta en esa posición
-                        player.Hand.ReplaceCardAt(change.CardIndex, newCard);
-                    }
-                }
-            }
-        }
     }
 
     // ===== TURNO DE JUGADORES =====

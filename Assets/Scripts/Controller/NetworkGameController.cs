@@ -102,7 +102,6 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
     private PhotonView photonView;
     private int localPlayerIndex = -1;
     private GameState gameState;
-    private GameLogic gameLogic;
 
     private List<Transform> _handAreas = new List<Transform>();
     private List<TMP_Text> _creditsTexts = new List<TMP_Text>();
@@ -118,16 +117,17 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
 
     private List<Transform> _interferenceFields = new List<Transform>();
     private List<List<GameObject>> _protectedCardInstances = new List<List<GameObject>>();
-    private int _playersWhoStood = 0;
     private bool _isAnimating = false;
     private readonly HashSet<int> _readyActors = new HashSet<int>(); // ActorNumbers que han avisado de que estan listos (sin duplicados)
     private bool _roundStarted = false;
     
-    private int _bettingRoundStarter = 0;
 
     // Comandos: reglas que valida CommandValidator y si tenemos un comando "en vuelo"
     private RulesConfig _rules;
     private bool _awaitingCommandResult = false; // true desde que enviamos un comando hasta que el Master lo acepta o rechaza
+
+    // Solo el Master: azar para barajar y para el shifting (el mazo nunca sale de aqui)
+    private readonly System.Random _rng = new System.Random();
 
     private const int START_CAMERA_INDEX = 4;
     private const int END_CAMERA_INDEX = 5;
@@ -148,7 +148,11 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
         {
             MaxCardsInHand = maxCardsInHand,
             MaxProtectedCards = maxProtectedCards,
-            FoldPenaltyFirstBetting = foldPenaltyFirstBetting
+            FoldPenaltyFirstBetting = foldPenaltyFirstBetting,
+            StartingCredits = startingCredits,
+            InitialBet = initialBet,
+            BombedOutPenalty = bombedOutPenalty,
+            CallPenalty = callPenalty
         };
 
         SetupReferences(); // Configurar referencias a UI y otros objetos
@@ -351,161 +355,6 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
         }
     }
 
-    // RPC llamado en el Master cuando un cliente indica que esta listo
-    // (actualmente no se invoca desde ningun sitio; se conserva para una futura reconexion)
-    [PunRPC]
-    void RPC_ClientReady(int actorNumber)
-    {
-        if (!PhotonNetwork.IsMasterClient) return; // Solo el Master procesa esto
-
-        // Enviar estado del juego al cliente que se ha unido
-        if (gameState != null)
-        {
-            string[] playerNames = new string[gameState.Players.Count];
-            int[] actorNumbers = new int[gameState.Players.Count];
-            for (int i = 0; i < gameState.Players.Count; i++)
-            {
-                playerNames[i] = gameState.Players[i].Name;
-                actorNumbers[i] = gameState.Players[i].Id.Value;
-            }
-            
-            // Buscar al jugador por su ActorNumber (no por indice)
-            Photon.Realtime.Player targetPlayer = PhotonNetwork.CurrentRoom.GetPlayer(actorNumber);
-
-            // Enviar estado del juego al jugador objetivo
-            if (targetPlayer != null)
-            {
-                photonView.RPC("RPC_GameInitialized", targetPlayer, playerNames, actorNumbers, startingCredits); // Enviar inicializacion
-            }
-            
-            if (gameState.CurrentRound > 0 || gameState.Players[0].Hand.GetCount() > 0)
-            {
-                string[] cardIds = SerializeAllHands(); // Serializar manos de todos los jugadores
-
-                if (targetPlayer != null)
-                {
-                    // Enviar estado del juego actual al jugador objetivo
-                    photonView.RPC("RPC_SyncGameState", targetPlayer, 
-                        gameState.HandPot, gameState.SabaccPot, cardIds, 
-                        gameState.CurrentPlayerIndex, (int)gameState.CurrentPhase);
-                }
-            }
-            else if (PhotonNetwork.CurrentRoom.PlayerCount >= 2 && gameState.CurrentRound == 0)
-            {
-                CancelInvoke(nameof(StartNewRound)); // Cancelar invocacion previa
-                Invoke(nameof(StartNewRound), 1.5f); // Iniciar nueva ronda despues de un delay
-            }
-        }
-    }
-
-    // Serializar las manos de todos los jugadores en un array de IDs de cartas
-    [PunRPC]
-    void RPC_SyncGameState(int handPot, int sabaccPot, string[] cardIds, int currentPlayerIdx, int currentPhase)
-    {
-        // Asegurar que gameState existe
-        if (gameState == null)
-        {
-            Debug.LogError("[RPC_SyncGameState] gameState es NULL!");
-            return;
-        }
-        
-        gameState.HandPot = handPot; // Actualizar bote de mano
-        gameState.SabaccPot = sabaccPot; // Actualizar bote de sabacc
-        gameState.CurrentPlayerIndex = currentPlayerIdx; // Actualizar indice del jugador actual
-        gameState.CurrentPhase = (GamePhase)currentPhase; // Actualizar fase actual
-
-        foreach (var player in gameState.Players)
-        {
-            player.Hand.Clear(); // Limpiar manos de todos los jugadores
-        }
-        
-        int playerIdx = 0; // Indice del jugador actual
-        foreach (string cardId in cardIds)
-        {
-            if (cardId == "|") // Separador de jugadores
-            {
-                playerIdx++; // Incrementar indice del jugador
-                continue;
-            }
-            
-            if (playerIdx < gameState.Players.Count)
-            {
-                var card = SabaccCardDefinitions.GetCardById(cardId); // Obtener carta por ID
-                if (card != null) // Verificar que la carta existe
-                {
-                    gameState.Players[playerIdx].Hand.AddCard(card); // Agregar carta a la mano del jugador
-                }
-            }
-        }
-        
-        UpdateUI(); // Actualizar UI
-        StartCoroutine(SyncVisualsAndContinue()); // Sincronizar visuales y continuar
-    }
-
-    // Serializar las manos de todos los jugadores en un array de IDs de cartas
-    IEnumerator SyncVisualsAndContinue()
-    {
-        _isAnimating = true; // Marcar que se esta animando
-        CleanupAllCards(); // Limpiar todas las cartas visuales
-
-        if (gameState.CurrentPhase == GamePhase.Reveal) // Si estamos en fase de revelacion
-        {
-            SwitchToCamera(END_CAMERA_INDEX); // Cambiar a camara final
-        }
-        else
-        {
-            SwitchToCamera(START_CAMERA_INDEX); // Cambiar a camara inicial
-        }
-        
-        CreateVisualDeck(); // Crear deck visual
-
-        yield return new WaitForSeconds(0.5f); // Esperar un momento
-
-        for (int i = 0; i < gameState.Players.Count; i++) // Para cada jugador
-        {
-            var player = gameState.Players[i]; // Obtener jugador actual
-            for (int j = 0; j < player.Hand.GetCount(); j++) // Para cada carta en la mano del jugador
-            {
-                SabaccCard card = player.Hand.GetCards()[j]; // Obtener carta actual
-                Vector3 targetPos = _positionCalculator.CalculatePosition(_handAreas[i], j, player.Hand.GetCount()); // Calcular posicion objetivo
-
-                GameObject prefab = cardPrefabMap.GetPrefab(card.GetCardId()); // Obtener prefab de la carta
-                if (prefab != null) 
-                {
-                    GameObject instance = Instantiate(prefab, targetPos, _handAreas[i].rotation); // Instanciar carta
-                    instance.transform.SetParent(_handAreas[i], true); // Establecer padre
-                    instance.transform.localScale = Vector3.one; // Asegurar escala correcta
-
-                    var cardView = instance.GetComponent<CardView>() ?? instance.AddComponent<CardView>(); // Obtener o agregar componente CardView
-                    cardView.SetCard(card); // Establecer datos de la carta 
-                    cardView.SetFaceUp(false); // Inicialmente boca abajo
-
-                    _cardInstances[i].Add(instance); // Agregar a la lista de cartas del jugador
-                }
-            }
-        }
-        
-        yield return new WaitForSeconds(0.3f); // Esperar un momento
-        SwitchToMyCamera(); // Cambiar a la camara del jugador local
-
-        if (localPlayerIndex >= 0 && localPlayerIndex < _cardInstances.Count) // Verificar indice del jugador local
-        {
-            yield return AnimationManager.Instance.RevealPlayerHand(_cardInstances[localPlayerIndex]); // Revelar mano del jugador local
-        }
-        
-        _isAnimating = false; // Marcar que la animacion ha terminado
-        UpdateUI(); // Actualizar UI
-
-        if (gameState.CurrentPhase == GamePhase.Drawing) 
-        {
-            ShowTransitionScreen(); // Mostrar pantalla de transicion
-        }
-        else
-        {
-            gameStateText.text = "Fase: " + gameState.CurrentPhase;
-        }
-    }
-
     // Inicializar el estado del juego
     void InitializeGame()
     { 
@@ -529,7 +378,6 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
         }
 
         gameState = new GameState(seats, startingCredits); // Crear nuevo estado del juego
-        gameLogic = new GameLogic(); // Crear nueva logica del juego
         localPlayerIndex = ResolveLocalPlayerIndex(); // El Master ignora RPC_GameInitialized, asi que lo resuelve aqui
 
         HideUnusedPlayerUI(seats.Count); // Ocultar UI de jugadores no activos
@@ -584,7 +432,6 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
         }
 
         gameState = new GameState(seats, credits);
-        gameLogic = new GameLogic();
         localPlayerIndex = ResolveLocalPlayerIndex();
         
         HideUnusedPlayerUI(seats.Count);
@@ -593,289 +440,204 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
         gameStateText.text = "Juego inicializado. Esperando inicio de ronda...";
     }
 
+    //  EVENTOS: el Master decide, todos aplican
+    //
+    //  El estado de la partida SOLO cambia en GameReducer.Apply, y siempre a partir de
+    //  eventos que decide el Master (GameEngine). El Master no aplica nada por su cuenta:
+    //  recibe sus propios eventos por RPC_ApplyEvents igual que los clientes.
+    //  Tras aplicar cada evento, Present(evento) lanza la parte visual (animaciones,
+    //  textos, sonidos) y, en el Master, las reacciones de flujo (siguiente fase...).
+
+    private bool _isApplyingEvents = false;
+    private readonly List<List<GameEvent>> _deferredBroadcasts = new List<List<GameEvent>>();
+    private readonly Queue<byte[]> _pendingPayloads = new Queue<byte[]>();
+
+    // Solo el Master: envia eventos a todos (incluido a si mismo)
+    void Broadcast(List<GameEvent> events)
+    {
+        if (!PhotonNetwork.IsMasterClient || events == null || events.Count == 0) return;
+
+        // Un RPC a "All" se ejecuta en el Master al instante. Si ya estamos aplicando
+        // otro lote, este se envia al terminarlo: asi el Master aplica los eventos
+        // exactamente en el mismo orden en que les llegan a los clientes.
+        if (_isApplyingEvents)
+        {
+            _deferredBroadcasts.Add(events);
+            return;
+        }
+
+        photonView.RPC(nameof(RPC_ApplyEvents), RpcTarget.All, EventCodec.Encode(events));
+    }
+
+    void Broadcast(GameEvent e)
+    {
+        Broadcast(new List<GameEvent> { e });
+    }
+
+    [PunRPC]
+    void RPC_ApplyEvents(byte[] payload, PhotonMessageInfo info)
+    {
+        if (!IsFromMaster(info)) return; // solo el Master emite eventos de partida
+
+        // Si aun no tenemos GameState (RPC_GameInitialized en camino), esperar sin perder el orden
+        if (gameState == null || _pendingPayloads.Count > 0)
+        {
+            _pendingPayloads.Enqueue(payload);
+            if (_pendingPayloads.Count == 1)
+                StartCoroutine(ApplyPendingPayloadsWhenReady());
+            return;
+        }
+
+        ApplyPayload(payload);
+    }
+
+    IEnumerator ApplyPendingPayloadsWhenReady()
+    {
+        float waited = 0f;
+        while (gameState == null && waited < 5f)
+        {
+            yield return null;
+            waited += Time.unscaledDeltaTime;
+        }
+
+        if (gameState == null)
+        {
+            Debug.LogError("[RPC_ApplyEvents] Llegaron eventos pero la partida no se inicializo");
+            _pendingPayloads.Clear();
+            yield break;
+        }
+
+        while (_pendingPayloads.Count > 0)
+            ApplyPayload(_pendingPayloads.Dequeue());
+    }
+
+    void ApplyPayload(byte[] payload)
+    {
+        List<GameEvent> events = EventCodec.Decode(payload);
+
+        _isApplyingEvents = true;
+        try
+        {
+            foreach (GameEvent e in events)
+            {
+                GameReducer.Apply(gameState, e); // 1. el modelo (igual en todos)
+                Present(e);                       // 2. lo visual (y reacciones del Master)
+            }
+        }
+        finally
+        {
+            _isApplyingEvents = false;
+        }
+
+        // Lo que el Master haya decidido mientras aplicaba se envia ahora, en orden
+        while (_deferredBroadcasts.Count > 0)
+        {
+            List<GameEvent> next = _deferredBroadcasts[0];
+            _deferredBroadcasts.RemoveAt(0);
+            Broadcast(next);
+        }
+    }
+
+    // Parte visual de cada evento. El modelo ya esta actualizado cuando se llama.
+    void Present(GameEvent e)
+    {
+        switch (e)
+        {
+            case RoundStarted x: PresentRoundStarted(x); break;
+            case PhaseChanged x: PresentPhaseChanged(x); break;
+            case TurnChanged x: PresentTurnChanged(x); break;
+            case PlayerChecked x: PresentPlayerChecked(x); break;
+            case BetPlaced x: PresentBetPlaced(x); break;
+            case BetMatched x: PresentBetMatched(x); break;
+            case PlayerCalled x: PresentPlayerCalled(x); break;
+            case PlayerFolded x: PresentPlayerFolded(x); break;
+            case CardDrawn x: PresentCardDrawn(x); break;
+            case PlayerStood x: PresentPlayerStood(x); break;
+            case CardDiscarded x: PresentCardDiscarded(x); break;
+            case CardProtectionChanged x: PresentCardProtectionChanged(x); break;
+            case CardsShifted x: PresentCardsShifted(x); break;
+            case RoundEnded x: PresentRoundEnded(x); break;
+            case PlayerLeft x: PresentPlayerLeft(x); break;
+            case GameOver x: PresentGameOver(x); break;
+            case GameRestarted x: PresentGameRestarted(x); break;
+            default:
+                // PenaltyPaid, PlayerBombedOut, PotAwarded: solo mueven dinero y estado;
+                // el resultado se muestra al llegar RoundEnded
+                UpdateUI();
+                break;
+        }
+    }
+
+    // Solo el Master: baraja (el mazo nunca sale de aqui) y anuncia la ronda
     void StartNewRound()
     {
         if (!PhotonNetwork.IsMasterClient) return;
 
+        GameEngine.PrepareDeck(gameState, _rng);
+        Broadcast(GameEngine.PlanRoundStart(gameState, _rules));
+    }
+
+    void PresentRoundStarted(RoundStarted e)
+    {
+        Debug.Log($"[Ronda {e.Round}] Empieza. LocalPlayer: {localPlayerIndex}");
+        _awaitingCommandResult = false;
+        _selectedCardIndex = -1;
+        _isAnimating = false;
+
         if (panelFinal != null)
             panelFinal.SetActive(false);
 
-        _selectedCardIndex = -1;
-        _playersWhoStood = 0;
-        gameState.CallerIndex = -1;
-        gameState.CurrentHighestBet = 0;
-
-        gameLogic.InitializeNewRound(gameState);
-
-        //
-        int activePlayersWithCredits = 0;
-        int lastActivePlayerIndex = -1;
-        List<int> playersWithoutCredits = new List<int>();
-        
-        // Identificar quién puede pagar y quién no
-        for (int i = 0; i < gameState.Players.Count; i++)
-        {
-            var player = gameState.Players[i];
-            
-            if (player.Credits >= initialBet * 2)
-            {
-                // Jugador puede pagar
-                player.DeductCredits(initialBet * 2);
-                gameState.HandPot += initialBet;
-                gameState.SabaccPot += initialBet;
-                activePlayersWithCredits++;
-                lastActivePlayerIndex = i;
-            }
-            else
-            {
-                // Jugador no puede pagar - marcarlo como retirado
-                gameLogic.PlayerFold(player);
-                playersWithoutCredits.Add(i);
-                Debug.Log($"[StartNewRound] {player.Name} no tiene créditos suficientes (tiene {player.Credits}, necesita {initialBet * 2})");
-            }
-        }
-        
-        // Si solo queda 1 o ningún jugador con créditos, terminar la partida
-        if (activePlayersWithCredits <= 1)
-        {   
-            if (activePlayersWithCredits == 1 && lastActivePlayerIndex >= 0)
-            {
-                // Un solo ganador
-                Player winner = gameState.Players[lastActivePlayerIndex];
-                int totalWon = gameState.HandPot + gameState.SabaccPot;
-                
-                photonView.RPC("RPC_GameOverByCredits", RpcTarget.All, lastActivePlayerIndex, totalWon);
-            }
-            else
-            {
-                // Nadie tiene créditos suficientes
-                photonView.RPC("RPC_GameOverNoWinner", RpcTarget.All);
-            }
-            return;
-        }
-
-        // La partida continúa normalmente
-        gameState.CurrentPhase = GamePhase.Dealing;
-        gameLogic.DealInitialCards(gameState);
-
-        int[] playerCredits = new int[gameState.Players.Count];
-        int[] playerStates = new int[gameState.Players.Count];
-        for (int i = 0; i < gameState.Players.Count; i++)
-        {
-            playerCredits[i] = gameState.Players[i].Credits;
-            playerStates[i] = (int)gameState.Players[i].State;
-        }
-
-        string[] cardIds = SerializeInitialDeal();
-        
-        photonView.RPC("RPC_StartNewRound", RpcTarget.All,
-            gameState.HandPot, gameState.SabaccPot, cardIds, gameState.DealerIndex, gameState.CurrentPlayerIndex, playerCredits, playerStates);
-    }
-    
-    //
-    [PunRPC]
-    void RPC_GameOverByCredits(int winnerIndex, int totalWon)
-    {
-        if (gameState == null || winnerIndex < 0 || winnerIndex >= gameState.Players.Count)
-        {
-            Debug.LogError($"[RPC_GameOverByCredits] Estado inválido! gameState={gameState}, winnerIndex={winnerIndex}");
-            StartCoroutine(SalirYLimpiar());
-            return;
-        }
-
-        Player winner = gameState.Players[winnerIndex];
-        winner.AddCredits(totalWon);
-        gameState.HandPot = 0;
-        gameState.SabaccPot = 0;
-        
-        if (AudioManager.Instance != null)
-        {
-            if (winnerIndex == localPlayerIndex)
-                AudioManager.Instance.PlayWin();
-            else
-                AudioManager.Instance.PlayLose();
-            
-            AudioManager.Instance.PlayGameOver();
-        }
-        
-        /*
-        gameStateText.text = $"{winner.Name} GANA LA PARTIDA!\n" +
-                            $"Los demas jugadores no tienen creditos suficientes.\n" +
-                            $"Gana {totalWon} creditos totales.\n\n" +
-                            "FIN DE LA PARTIDA!";
-        */
-
-        string mensaje = $"{winner.Name} GANA LA PARTIDA!\n" +
-                     "Los demas jugadores no tienen creditos suficientes.\n" +
-                     $"Gana {totalWon} creditos totales.\n" +
-                     "FIN DE LA PARTIDA!";
-
-        MostrarPanelFinal(mensaje);
-             
-        DisableAllButtons();
+        if (transitionPanel != null)
+            transitionPanel.SetActive(false);
         ShowBettingControls(false);
-        
-        StartCoroutine(ReturnToLobbyAfterDelay(8f));
+
+        CleanupAllCards();
+        UpdateUI();
+        StartCoroutine(ShowDeckAndDeal());
     }
-    
-    [PunRPC]
-    void RPC_GameOverNoWinner()
+
+    void PresentGameOver(GameOver e)
     {
         if (AudioManager.Instance != null)
+        {
+            if (e.WinnerIndex >= 0)
+            {
+                if (e.WinnerIndex == localPlayerIndex)
+                    AudioManager.Instance.PlayWin();
+                else
+                    AudioManager.Instance.PlayLose();
+            }
             AudioManager.Instance.PlayGameOver();
-        
-        /*
-        gameStateText.text = "PARTIDA TERMINADA!\n" +
-                            "Ningun jugador tiene creditos suficientes para continuar.";
-        */
+        }
 
-        string mensaje = "PARTIDA TERMINADA!\n" +
-                     "Ningun jugador tiene creditos suficientes para continuar.";
+        string mensaje = e.WinnerIndex >= 0
+            ? $"{gameState.Players[e.WinnerIndex].Name} GANA LA PARTIDA!\n" +
+              "Los demas jugadores no tienen creditos suficientes.\n" +
+              $"Gana {e.AmountWon} creditos totales.\n" +
+              "FIN DE LA PARTIDA!"
+            : "PARTIDA TERMINADA!\n" +
+              "Ningun jugador tiene creditos suficientes para continuar.";
 
         MostrarPanelFinal(mensaje);
-            
         DisableAllButtons();
         ShowBettingControls(false);
-        
+        UpdateUI();
+
         StartCoroutine(ReturnToLobbyAfterDelay(8f));
-        
     }
-    
+
     IEnumerator ReturnToLobbyAfterDelay(float delay)
     {
         yield return new WaitForSeconds(delay);
         PhotonNetwork.LeaveRoom();
-        
+
         // Esperar a que se salga de la sala
         while (PhotonNetwork.InRoom)
         {
             yield return null;
         }
-        
+
         UnityEngine.SceneManagement.SceneManager.LoadScene("Inicio");
-    }
-
-    string[] SerializeInitialDeal()
-    {
-        List<string> allCards = new List<string>();
-        foreach (var player in gameState.Players)
-        {
-            foreach (var card in player.Hand.GetCards())
-            {
-                allCards.Add(card.GetCardId());
-            }
-        }
-        return allCards.ToArray();
-    }
-
-    [PunRPC]
-    void RPC_StartNewRound(int handPot, int sabaccPot, string[] cardIds, int dealerIndex, int currentPlayerIndex, int[] playerCredits, int[] playerStates)
-    {
-        Debug.Log($"[RPC_StartNewRound] Recibido. HandPot: {handPot}, SabaccPot: {sabaccPot}, Cards: {cardIds.Length}");
-        
-        // Asegurar que gameState existe
-        if (gameState == null)
-        {
-            Debug.LogWarning("[RPC_StartNewRound] gameState era NULL, intentando inicializar...");
-            // Intentar esperar a que se inicialice
-            StartCoroutine(WaitForGameStateAndStartRound(handPot, sabaccPot, cardIds, dealerIndex, currentPlayerIndex, playerCredits, playerStates));
-            return;
-        }
-
-        DoStartNewRound(handPot, sabaccPot, cardIds, dealerIndex, currentPlayerIndex, playerCredits, playerStates);
-    }
-    
-    IEnumerator WaitForGameStateAndStartRound(int handPot, int sabaccPot, string[] cardIds, int dealerIndex, int currentPlayerIndex, int[] playerCredits, int[] playerStates)
-    {
-        float timeout = 5f;
-        float elapsed = 0f;
-        
-        while (gameState == null && elapsed < timeout)
-        {
-            yield return new WaitForSeconds(0.1f);
-            elapsed += 0.1f;
-        }
-        
-        if (gameState != null)
-        {
-            Debug.Log("[WaitForGameStateAndStartRound] gameState inicializado, continuando...");
-            DoStartNewRound(handPot, sabaccPot, cardIds, dealerIndex, currentPlayerIndex, playerCredits, playerStates);
-        }
-        else
-        {
-            Debug.LogError("[WaitForGameStateAndStartRound] Timeout esperando gameState!");
-        }
-    }
-    
-    void DoStartNewRound(int handPot, int sabaccPot, string[] cardIds, int dealerIndex, int currentPlayerIndex, int[] playerCredits, int[] playerStates)
-    {
-        Debug.Log($"[DoStartNewRound] Iniciando ronda. LocalPlayer: {localPlayerIndex}");
-        _awaitingCommandResult = false;
-        
-        _selectedCardIndex = -1;
-        _playersWhoStood = 0;
-        _isAnimating = false;
-        gameState.CallerIndex = -1;
-        gameState.CurrentHighestBet = 0;
-
-        if (panelFinal != null)
-            panelFinal.SetActive(false);
-        
-        if (transitionPanel != null)
-            transitionPanel.SetActive(false);
-        ShowBettingControls(false);
-
-        gameState.HandPot = handPot;
-        gameState.SabaccPot = sabaccPot;
-        gameState.DealerIndex = dealerIndex;
-        gameState.CurrentPlayerIndex = currentPlayerIndex;
-        gameState.CurrentPhase = GamePhase.Dealing;
-        
-        //
-        for (int i = 0; i < gameState.Players.Count && i < playerCredits.Length; i++)
-        {
-            gameState.Players[i].Credits = playerCredits[i];
-            
-            // Aplicar estado del jugador (activo/retirado)
-            if (i < playerStates.Length)
-            {
-                gameState.Players[i].State = (PlayerState)playerStates[i];
-            }
-            
-            // Solo resetear si esta activo
-            if (gameState.Players[i].State == PlayerState.Active)
-            {
-                gameState.Players[i].Hand.Clear();
-            }
-        }
-        
-        // Repartir cartas solo a jugadores activos
-        int cardIndex = 0;
-        foreach (var player in gameState.Players)
-        {
-            if (player.State == PlayerState.Active)
-            {
-                player.Hand.Clear();
-                
-                for (int i = 0; i < 2; i++)
-                {
-                    if (cardIndex < cardIds.Length)
-                    {
-                        var card = SabaccCardDefinitions.GetCardById(cardIds[cardIndex]);
-                        if (card != null)
-                        {
-                            player.Hand.AddCard(card);
-                        }
-                        cardIndex++;
-                    }
-                }
-            }
-        }
-
-        CleanupAllCards();
-
-        UpdateUI();
-        StartCoroutine(ShowDeckAndDeal());
     }
 
     void CleanupAllCards()
@@ -957,37 +719,7 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
     void StartFirstBettingPhase()
     {
         if (!PhotonNetwork.IsMasterClient) return;
-        photonView.RPC("RPC_StartFirstBettingPhase", RpcTarget.All);
-    }
-    
-    [PunRPC]
-    void RPC_StartFirstBettingPhase()
-    {
-        Debug.Log("[RPC_StartFirstBettingPhase] Iniciando primera ronda de apuestas");
-        gameState.CurrentPhase = GamePhase.FirstBetting;
-        gameState.CallerIndex = -1;
-        
-        foreach (var player in gameState.Players)
-        {
-            player.ResetBettingRound();
-        }
-        gameState.CurrentHighestBet = 0;
-        _bettingRoundStarter = 0;
-        gameState.CurrentPlayerIndex = 0;
-        
-        // Buscar primer jugador activo
-        while (gameState.CurrentPlayerIndex < gameState.Players.Count && 
-               gameState.Players[gameState.CurrentPlayerIndex].State != PlayerState.Active)
-        {
-            gameState.CurrentPlayerIndex++;
-        }
-        
-        if (gameState.CurrentPlayerIndex >= gameState.Players.Count)
-            gameState.CurrentPlayerIndex = 0;
-        
-        gameStateText.text = "Primera ronda de apuestas";
-        UpdateUI();
-        StartBettingRound();
+        Broadcast(GameEngine.PlanPhaseStart(gameState, GamePhase.FirstBetting));
     }
 
     //  SHIFTING 
@@ -996,76 +728,32 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
     [Range(0.2f, 0.33f)]
     public float shiftProbability = 0.25f; // 25% de probabilidad por defecto
 
-    void TriggerFirstShift()
+    // Solo el Master: decide el shift con el mazo real y lo anuncia
+    void TriggerShift(ShiftKind kind)
     {
         if (!PhotonNetwork.IsMasterClient) return;
-        
-        // Aplicar shifting y obtener los cambios
-        List<GameLogic.ShiftResult> changes = gameLogic.ApplyShifting(gameState, shiftProbability);
-        
-        // Serializar los cambios para enviar por RPC
-        int[] playerIndices = new int[changes.Count];
-        int[] cardIndices = new int[changes.Count];
-        string[] oldCardIds = new string[changes.Count];
-        string[] newCardIds = new string[changes.Count];
-        
-        for (int i = 0; i < changes.Count; i++)
-        {
-            playerIndices[i] = changes[i].PlayerIndex;
-            cardIndices[i] = changes[i].CardIndex;
-            oldCardIds[i] = changes[i].OldCardId;
-            newCardIds[i] = changes[i].NewCardId;
-        }
-        
-        // Enviar a todos los jugadores
-        photonView.RPC("RPC_ApplyShifting", RpcTarget.All, 
-            playerIndices, cardIndices, oldCardIds, newCardIds, true); // true = isFirstShift
+        Broadcast(GameEngine.PlanShifting(gameState, shiftProbability, _rng, kind));
     }
 
-    void TriggerSecondShift()
+    void PresentCardsShifted(CardsShifted e)
     {
-        if (!PhotonNetwork.IsMasterClient) return;
-        
-        // Aplicar shifting y obtener los cambios
-        List<GameLogic.ShiftResult> changes = gameLogic.ApplyShifting(gameState, shiftProbability);
-        
-        // Serializar los cambios para enviar por RPC
-        int[] playerIndices = new int[changes.Count];
-        int[] cardIndices = new int[changes.Count];
-        string[] oldCardIds = new string[changes.Count];
-        string[] newCardIds = new string[changes.Count];
-        
-        for (int i = 0; i < changes.Count; i++)
-        {
-            playerIndices[i] = changes[i].PlayerIndex;
-            cardIndices[i] = changes[i].CardIndex;
-            oldCardIds[i] = changes[i].OldCardId;
-            newCardIds[i] = changes[i].NewCardId;
-        }
-        
-        // Enviar a todos los jugadores
-        photonView.RPC("RPC_ApplyShifting", RpcTarget.All, 
-            playerIndices, cardIndices, oldCardIds, newCardIds, false); // false = isSecondShift
+        if (e.Kind == ShiftKind.AfterCall)
+            StartCoroutine(AnimateShiftAndReveal(e));
+        else
+            StartCoroutine(AnimateShifting(e));
     }
 
-    [PunRPC]
-    void RPC_ApplyShifting(int[] playerIndices, int[] cardIndices, string[] oldCardIds, string[] newCardIds, bool isFirstShift)
-    {
-        string shiftName = isFirstShift ? "FIRST SHIFT" : "SECOND SHIFT";
-
-        StartCoroutine(AnimateShifting(playerIndices, cardIndices, oldCardIds, newCardIds, isFirstShift));
-    }
-
-    IEnumerator AnimateShifting(int[] playerIndices, int[] cardIndices, string[] oldCardIds, string[] newCardIds, bool isFirstShift)
+    IEnumerator AnimateShifting(CardsShifted e)
     {
         _isAnimating = true;
-        
+
+        bool isFirstShift = e.Kind == ShiftKind.First;
         string shiftName = isFirstShift ? "PRIMER SHIFT" : "SEGUNDO SHIFT";
-        
+
         // Sonido de shift
         if (AudioManager.Instance != null) AudioManager.Instance.PlayShift();
-        
-        if (playerIndices.Length == 0)
+
+        if (e.Shifts.Count == 0)
         {
             gameStateText.text = $" {shiftName} \nNinguna carta cambio!";
             yield return new WaitForSeconds(2f);
@@ -1074,63 +762,21 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
         {
             gameStateText.text = $" {shiftName} \nLas cartas estan cambiando!";
             yield return new WaitForSeconds(1f);
-            
-            // Animar cada carta que cambio
-            for (int i = 0; i < playerIndices.Length; i++)
+
+            // Animar cada carta que cambio (el modelo ya lo actualizo el reducer)
+            foreach (CardShift shift in e.Shifts)
             {
-                int playerIdx = playerIndices[i];
-                int cardIdx = cardIndices[i];
-                string oldCardId = oldCardIds[i];
-                string newCardId = newCardIds[i];
-                bool isMyCard = (playerIdx == localPlayerIndex);
-                
-                // Verificar que los indices son validos
-                if (playerIdx >= _cardInstances.Count)
-                {
-                    Debug.LogError($"[AnimateShifting] playerIdx {playerIdx} fuera de rango (max: {_cardInstances.Count})");
-                    continue;
-                }
-                
-                if (cardIdx >= _cardInstances[playerIdx].Count)
-                {
-                    Debug.LogError($"[AnimateShifting] cardIdx {cardIdx} fuera de rango para jugador {playerIdx} (max: {_cardInstances[playerIdx].Count})");
-                    continue;
-                }
-                
-                // Esto es necesario para que la revelacion muestre los valores correctos
-                if (!PhotonNetwork.IsMasterClient)
-                {
-                    SabaccCard newCard = SabaccCardDefinitions.GetCardById(newCardId);
-                    if (newCard != null && playerIdx < gameState.Players.Count)
-                    {
-                        gameState.Players[playerIdx].Hand.ReplaceCardAt(cardIdx, newCard);
-                    }
-                }
-                
-                // Animar el cambio visual
-                GameObject cardObject = _cardInstances[playerIdx][cardIdx];
-                
-                if (cardObject != null)
-                {
-                    // Siempre reemplazar la carta visual (AnimateCardShift maneja si mostrar boca arriba o abajo)
-                    yield return StartCoroutine(AnimateCardShift(cardObject, playerIdx, cardIdx, newCardId));
-                }
-                else
-                {
-                    Debug.LogError($"[AnimateShifting] cardObject es NULL para jugador {playerIdx}, carta {cardIdx}");
-                    // Intentar crear la carta desde cero si no existe
-                    yield return StartCoroutine(CreateMissingCard(playerIdx, cardIdx, newCardId));
-                }
+                yield return StartCoroutine(AnimateOneShift(shift));
             }
-            
+
             // Mostrar resumen
             int myChangedCards = 0;
-            for (int i = 0; i < playerIndices.Length; i++)
+            foreach (CardShift shift in e.Shifts)
             {
-                if (playerIndices[i] == localPlayerIndex)
+                if (shift.PlayerIndex == localPlayerIndex)
                     myChangedCards++;
             }
-            
+
             if (myChangedCards > 0)
             {
                 gameStateText.text = $" {shiftName} \n{myChangedCards} de tus cartas cambiaron!";
@@ -1139,29 +785,54 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
             {
                 gameStateText.text = $" {shiftName} \nTus cartas no cambiaron!";
             }
-            
+
             yield return new WaitForSeconds(1.5f);
         }
-        
+
         // Actualizar valor de mano despues del shift
         if (localPlayerIndex >= 0 && localPlayerIndex < gameState.Players.Count)
         {
             UpdateCurrentPlayerHandValue();
         }
-        
+
         _isAnimating = false;
-        
+
         // Continuar con la siguiente fase
         if (PhotonNetwork.IsMasterClient)
         {
-            if (isFirstShift)
-            {
-                photonView.RPC("RPC_AdvanceToDrawing", RpcTarget.All);
-            }
-            else
-            {
-                photonView.RPC("RPC_StartRevealPhase", RpcTarget.All);
-            }
+            GamePhase next = isFirstShift ? GamePhase.Drawing : GamePhase.Reveal;
+            Broadcast(GameEngine.PlanPhaseStart(gameState, next));
+        }
+    }
+
+    // Anima el cambio de una carta (sin tocar el modelo)
+    IEnumerator AnimateOneShift(CardShift shift)
+    {
+        int playerIdx = shift.PlayerIndex;
+        int cardIdx = shift.CardIndex;
+
+        if (playerIdx >= _cardInstances.Count)
+        {
+            Debug.LogError($"[AnimateOneShift] playerIdx {playerIdx} fuera de rango (max: {_cardInstances.Count})");
+            yield break;
+        }
+
+        if (cardIdx >= _cardInstances[playerIdx].Count)
+        {
+            Debug.LogError($"[AnimateOneShift] cardIdx {cardIdx} fuera de rango para jugador {playerIdx} (max: {_cardInstances[playerIdx].Count})");
+            yield break;
+        }
+
+        GameObject cardObject = _cardInstances[playerIdx][cardIdx];
+        if (cardObject != null)
+        {
+            // Siempre reemplazar la carta visual (AnimateCardShift maneja si mostrar boca arriba o abajo)
+            yield return StartCoroutine(AnimateCardShift(cardObject, playerIdx, cardIdx, shift.NewCardId));
+        }
+        else
+        {
+            Debug.LogError($"[AnimateOneShift] cardObject es NULL para jugador {playerIdx}, carta {cardIdx}");
+            yield return StartCoroutine(CreateMissingCard(playerIdx, cardIdx, shift.NewCardId));
         }
     }
 
@@ -1444,46 +1115,13 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
         }
     }
 
-    [PunRPC]
-    void RPC_StartCallingPhase()
-    {
-        Debug.Log("[RPC_StartCallingPhase] Iniciando fase de Calling");
-        gameState.CurrentPhase = GamePhase.Calling;
-        gameState.CallerIndex = -1;
-        
-        // Resetear apuestas de todos los jugadores para esta ronda
-        foreach (var player in gameState.Players)
-        {
-            player.ResetBettingRound();
-        }
-        gameState.CurrentHighestBet = 0;
-        
-        gameState.CurrentPlayerIndex = 0;
-        
-        // Buscar primer jugador activo desde el inicio
-        while (gameState.CurrentPlayerIndex < gameState.Players.Count && 
-               gameState.Players[gameState.CurrentPlayerIndex].State != PlayerState.Active)
-        {
-            gameState.CurrentPlayerIndex++;
-        }
-        
-        if (gameState.CurrentPlayerIndex >= gameState.Players.Count)
-            gameState.CurrentPlayerIndex = 0;
-        
-        _bettingRoundStarter = gameState.CurrentPlayerIndex;
-        
-        gameStateText.text = "Fase de Calling";
-        UpdateUI();
-        StartBettingRound();
-    }
-
     //  COMANDOS: el cliente pide, el Master valida y ejecuta 
     //
     //  1. El boton llama a SubmitCommand: se valida en local (feedback inmediato)
     //     y se envia al Master. Mientras esperamos, los controles quedan bloqueados.
     //  2. El Master (RPC_SubmitCommand) vuelve a validar con el MISMO CommandValidator
     //     sobre su estado, identificando al jugador por el remitente real del mensaje.
-    //  3. Si es valido, ExecuteCommand emite el evento a todos (RPC_PlayerBet, ...).
+    //  3. Si es valido, GameEngine.Handle devuelve los eventos y el Master los envia a todos.
     //     Si no, RPC_CommandRejected solo al remitente, que recupera sus controles.
 
     PlayerId LocalPlayerId => new PlayerId(PhotonNetwork.LocalPlayer.ActorNumber);
@@ -1551,59 +1189,16 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
         PlayerId sender = new PlayerId(info.Sender.ActorNumber);
         GameCommand command = new GameCommand((CommandType)type, sender, arg);
 
-        string error = CommandValidator.Validate(gameState, _rules, command);
-        if (error == null)
+        // El motor valida y decide; aqui solo se envian sus eventos o el rechazo
+        GameEngine.Result result = GameEngine.Handle(gameState, _rules, command);
+        if (!result.IsValid)
         {
-            error = ExecuteCommand(gameState.IndexOf(sender), command);
+            Debug.Log($"[Master] Comando rechazado: {command} -> {result.Error}");
+            photonView.RPC(nameof(RPC_CommandRejected), info.Sender, result.Error);
+            return;
         }
 
-        if (error != null)
-        {
-            Debug.Log($"[Master] Comando rechazado: {command} -> {error}");
-            photonView.RPC(nameof(RPC_CommandRejected), info.Sender, error);
-        }
-    }
-
-    // Ejecuta en el Master un comando ya validado y emite el evento a todos.
-    // Devuelve null, o un motivo de rechazo que solo el Master puede conocer (p. ej. mazo vacio).
-    string ExecuteCommand(int seat, GameCommand command)
-    {
-        Player player = gameState.Players[seat];
-
-        switch (command.Type)
-        {
-            case CommandType.Draw:
-                return ExecuteDraw(seat);
-            case CommandType.Stand:
-                ExecuteStand(seat);
-                return null;
-            case CommandType.Discard:
-                ExecuteDiscard(seat, command.Arg);
-                return null;
-            case CommandType.Protect:
-                ExecuteSetProtected(seat, command.Arg, true);
-                return null;
-            case CommandType.Unprotect:
-                ExecuteSetProtected(seat, command.Arg, false);
-                return null;
-            case CommandType.Check:
-                photonView.RPC(nameof(RPC_PlayerChecked), RpcTarget.All, seat);
-                return null;
-            case CommandType.Bet:
-                photonView.RPC(nameof(RPC_PlayerBet), RpcTarget.All, seat, command.Arg);
-                return null;
-            case CommandType.Match:
-                photonView.RPC(nameof(RPC_PlayerMatchedBet), RpcTarget.All, seat, gameState.AmountToCall(player));
-                return null;
-            case CommandType.Call:
-                photonView.RPC(nameof(RPC_PlayerCalled), RpcTarget.All, seat);
-                return null;
-            case CommandType.Fold:
-                int penalty = CommandValidator.FoldPenalty(gameState, _rules, player);
-                photonView.RPC(nameof(RPC_PlayerFolded), RpcTarget.All, seat, penalty);
-                return null;
-        }
-        return "Accion desconocida.";
+        Broadcast(result.Events);
     }
 
     [PunRPC]
@@ -1809,26 +1404,21 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
         SubmitCommand(CommandType.Check);
     }
     
-    [PunRPC]
-    void RPC_PlayerChecked(int playerIndex, PhotonMessageInfo info)
+    void PresentPlayerChecked(PlayerChecked e)
     {
-        if (!IsFromMaster(info)) return; // solo el Master emite eventos de partida
-        OnCommandResolved(playerIndex);
+        OnCommandResolved(e.PlayerIndex);
 
-        Player player = gameState.Players[playerIndex];
-        player.HasActedThisBettingRound = true;
-        
         // Sonido de check
         if (AudioManager.Instance != null) AudioManager.Instance.PlayCheck();
-        
-        gameStateText.text = $"{player.Name} paso.";
-        
+
+        gameStateText.text = $"{gameState.Players[e.PlayerIndex].Name} paso.";
+
         if (PhotonNetwork.IsMasterClient)
         {
             StartCoroutine(ProcessNextBettingTurn());
         }
     }
-    
+
     public void OnBetButton()
     {
         if (gameState == null) return;
@@ -1849,43 +1439,16 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
         SubmitCommand(CommandType.Bet, betAmount);
     }
     
-    [PunRPC]
-    void RPC_PlayerBet(int playerIndex, int betAmount, PhotonMessageInfo info)
+    void PresentBetPlaced(BetPlaced e)
     {
-        if (!IsFromMaster(info)) return; // solo el Master emite eventos de partida
-        OnCommandResolved(playerIndex);
+        OnCommandResolved(e.PlayerIndex);
 
-        Player player = gameState.Players[playerIndex];
-        int amountToCall = gameState.CurrentHighestBet - player.CurrentBet;
-        int totalBet = amountToCall + betAmount;
-        
         // Sonido de subir apuesta
         if (AudioManager.Instance != null) AudioManager.Instance.PlayRaise();
-        
-        // Descontar creditos
-        player.DeductCredits(totalBet);
-        player.CurrentBet = gameState.CurrentHighestBet + betAmount;
-        player.TotalBetThisRound += totalBet;
-        player.HasActedThisBettingRound = true;
-        
-        // Anadir al bote
-        gameState.HandPot += totalBet;
-        
-        // Actualizar apuesta mas alta
-        gameState.CurrentHighestBet = player.CurrentBet;
-        
-        foreach (var p in gameState.Players)
-        {
-            if (p != player && p.State == PlayerState.Active)
-            {
-                p.HasActedThisBettingRound = false;
-            }
-        }
-        
-        gameStateText.text = $"{player.Name} subio a {gameState.CurrentHighestBet}.";
+
+        gameStateText.text = $"{gameState.Players[e.PlayerIndex].Name} subio a {gameState.CurrentHighestBet}.";
         UpdateBettingUI();
-        UpdateUI();
-        
+
         if (PhotonNetwork.IsMasterClient)
         {
             StartCoroutine(ProcessNextBettingTurn());
@@ -1901,417 +1464,165 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
         SubmitCommand(amountToCall > 0 ? CommandType.Match : CommandType.Call);
     }
     
-    [PunRPC]
-    void RPC_PlayerMatchedBet(int playerIndex, int amount, PhotonMessageInfo info)
+    void PresentBetMatched(BetMatched e)
     {
-        if (!IsFromMaster(info)) return; // solo el Master emite eventos de partida
-        OnCommandResolved(playerIndex);
+        OnCommandResolved(e.PlayerIndex);
 
-        Player player = gameState.Players[playerIndex];
-        
         // Sonido de fichas
         if (AudioManager.Instance != null) AudioManager.Instance.PlayChipsPlace();
-        
-        player.DeductCredits(amount);
-        player.CurrentBet = gameState.CurrentHighestBet;
-        player.TotalBetThisRound += amount;
-        player.HasActedThisBettingRound = true;
-        
-        gameState.HandPot += amount;
-        
-        gameStateText.text = $"{player.Name} igualo ({amount}).";
+
+        gameStateText.text = $"{gameState.Players[e.PlayerIndex].Name} igualo ({e.Amount}).";
         UpdateBettingUI();
-        UpdateUI();
-        
+
         if (PhotonNetwork.IsMasterClient)
         {
             StartCoroutine(ProcessNextBettingTurn());
         }
     }
-    
-    [PunRPC]
-    void RPC_PlayerCalled(int playerIndex, PhotonMessageInfo info)
-    {
-        if (!IsFromMaster(info)) return; // solo el Master emite eventos de partida
-        OnCommandResolved(playerIndex);
 
-        gameState.CallerIndex = playerIndex;
-        
+    void PresentPlayerCalled(PlayerCalled e)
+    {
+        OnCommandResolved(e.PlayerIndex);
+
         // Sonido de call
         if (AudioManager.Instance != null) AudioManager.Instance.PlayCall();
-        
-        Player player = gameState.Players[playerIndex];
-        gameStateText.text = $"{player.Name} hizo CALL! Se forzara la revelacion.";
-        
+
+        gameStateText.text = $"{gameState.Players[e.PlayerIndex].Name} hizo CALL! Se forzara la revelacion.";
+
         ShowBettingControls(false);
-        
+
         if (PhotonNetwork.IsMasterClient)
         {
             // Hacer shift y revelar
             StartCoroutine(HandleCallSequence());
         }
     }
-    
+
     IEnumerator HandleCallSequence()
     {
         yield return new WaitForSeconds(1.5f);
-        
-        // Hacer un shift
-        TriggerShiftAfterCall();
+        TriggerShift(ShiftKind.AfterCall);
     }
-    
-    void TriggerShiftAfterCall()
-    {
-        if (!PhotonNetwork.IsMasterClient) return;
-        
-        var changes = gameLogic.ApplyShifting(gameState, shiftProbability);
-        
-        int[] playerIndices = new int[changes.Count];
-        int[] cardIndices = new int[changes.Count];
-        string[] oldCardIds = new string[changes.Count];
-        string[] newCardIds = new string[changes.Count];
-        
-        for (int i = 0; i < changes.Count; i++)
-        {
-            playerIndices[i] = changes[i].PlayerIndex;
-            cardIndices[i] = changes[i].CardIndex;
-            oldCardIds[i] = changes[i].OldCardId;
-            newCardIds[i] = changes[i].NewCardId;
-        }
-        
-        photonView.RPC("RPC_ApplyShiftAfterCall", RpcTarget.All, playerIndices, cardIndices, oldCardIds, newCardIds);
-    }
-    
-    [PunRPC]
-    void RPC_ApplyShiftAfterCall(int[] playerIndices, int[] cardIndices, string[] oldCardIds, string[] newCardIds)
-    {
-        StartCoroutine(AnimateShiftAndReveal(playerIndices, cardIndices, oldCardIds, newCardIds));
-    }
-    
-    IEnumerator AnimateShiftAndReveal(int[] playerIndices, int[] cardIndices, string[] oldCardIds, string[] newCardIds)
+
+    IEnumerator AnimateShiftAndReveal(CardsShifted e)
     {
         gameStateText.text = "SHIFT DESPUES DEL CALL";
         yield return new WaitForSeconds(1f);
-        
-        // Animar cambios del shift
-        for (int i = 0; i < playerIndices.Length; i++)
+
+        // Animar cambios del shift (el modelo ya lo actualizo el reducer, en todos)
+        foreach (CardShift shift in e.Shifts)
         {
-            int playerIdx = playerIndices[i];
-            int cardIdx = cardIndices[i];
-            string newCardId = newCardIds[i];
-            
-            if (playerIdx < _cardInstances.Count && cardIdx < _cardInstances[playerIdx].Count)
-            {
-                GameObject cardObject = _cardInstances[playerIdx][cardIdx];
-                if (cardObject != null)
-                {
-                    yield return StartCoroutine(AnimateCardShift(cardObject, playerIdx, cardIdx, newCardId));
-                }
-            }
-            
-            // Actualizar modelo en los clientes (el Master ya lo cambio en ApplyShifting).
-            // Antes solo se actualizaba la mano local y en la revelacion los demas valores salian mal.
-            if (!PhotonNetwork.IsMasterClient && playerIdx < gameState.Players.Count)
-            {
-                SabaccCard newCard = SabaccCardDefinitions.GetCardById(newCardId);
-                if (newCard != null)
-                {
-                    gameState.Players[playerIdx].Hand.ReplaceCardAt(cardIdx, newCard);
-                }
-            }
+            yield return StartCoroutine(AnimateOneShift(shift));
         }
-        
+
         yield return new WaitForSeconds(1f);
-        
+
         // Ir a revelacion
         if (PhotonNetwork.IsMasterClient)
         {
-            photonView.RPC("RPC_StartRevealPhase", RpcTarget.All);
+            Broadcast(GameEngine.PlanPhaseStart(gameState, GamePhase.Reveal));
         }
     }
-    
+
     public void OnFoldButton()
     {
         // La penalizacion la calcula el Master (CommandValidator.FoldPenalty)
         SubmitCommand(CommandType.Fold);
     }
     
-    [PunRPC]
-    void RPC_PlayerFolded(int playerIndex, int penalty, PhotonMessageInfo info)
+    void PresentPlayerFolded(PlayerFolded e)
     {
-        if (!IsFromMaster(info)) return; // solo el Master emite eventos de partida
-        OnCommandResolved(playerIndex);
+        OnCommandResolved(e.PlayerIndex);
+        Player player = gameState.Players[e.PlayerIndex];
 
-        Player player = gameState.Players[playerIndex];
-        
         // Sonido de fold
         if (AudioManager.Instance != null) AudioManager.Instance.PlayFold();
-        
-        if (penalty > 0)
-        {
-            player.DeductCredits(penalty);
-            gameState.SabaccPot += penalty;
-        }
-        
-        player.Fold();
-        
-        gameStateText.text = penalty > 0 
-            ? $"{player.Name} se retiro y pago {penalty} al Sabacc Pot."
+
+        gameStateText.text = e.Penalty > 0
+            ? $"{player.Name} se retiro y pago {e.Penalty} al Sabacc Pot."
             : $"{player.Name} se retiro.";
-        
+
         UpdateBettingUI();
-        UpdateUI();
-        
+
         if (PhotonNetwork.IsMasterClient)
         {
-            int activePlayers = gameState.GetActivePlayerCount();
-            if (activePlayers <= 1)
-            {
-                StartCoroutine(HandleLastPlayerStanding());
-            }
-            else
-            {
-                StartCoroutine(ProcessNextBettingTurn());
-            }
+            // Si solo queda uno, GameEngine.PlanBettingStep ya termina la ronda
+            StartCoroutine(ProcessNextBettingTurn());
         }
     }
-    
-    IEnumerator HandleLastPlayerStanding()
-    {
-        yield return new WaitForSeconds(1f);
-        
-        // Encontrar el ultimo jugador activo
-        int winnerIndex = -1;
-        for (int i = 0; i < gameState.Players.Count; i++)
-        {
-            if (gameState.Players[i].State == PlayerState.Active)
-            {
-                winnerIndex = i;
-                break;
-            }
-        }
-        
-        if (winnerIndex >= 0)
-        {
-            // Los creditos se suman en RPC_ShowLastManStanding (en todos, incluido el Master).
-            // Antes tambien se sumaban aqui, y el Master acababa con el bote duplicado.
-            int totalWon = gameState.HandPot;
-            
-            photonView.RPC("RPC_ShowLastManStanding", RpcTarget.All, winnerIndex, totalWon);
-        }
-    }
-    
-    [PunRPC]
-    void RPC_ShowLastManStanding(int winnerIndex, int amountWon)
-    {
-        Player winner = gameState.Players[winnerIndex];
-        
-        // Actualizar creditos del ganador
-        winner.AddCredits(amountWon);
-        gameState.HandPot = 0;
-        
-        //gameStateText.text = $"{winner.Name} gana {amountWon} creditos!\nTodos los demas se retiraron.";
 
-        string mensaje = $"{winner.Name} gana {amountWon} creditos!\n" +
-                     "Todos los demas se retiraron.";
-
-        MostrarPanelFinal(mensaje);
-        
-        ShowBettingControls(false);
-        UpdateUI();
-        
-        if (PhotonNetwork.IsMasterClient)
-        {
-            //StartCoroutine(PrepareNextRoundAfterDelay());
-            StartCoroutine(DelayedPrepareNextRound(8f)); // Se ponen 8 segundos para que alcance a leer el mensaje
-        }
-    }
-    
-    /*
-    IEnumerator PrepareNextRoundAfterDelay()
-    {
-        yield return new WaitForSeconds(3f);
-        PrepareNextRound();
-    }
-    */
-    
+    // Solo el Master: tras una accion de apuesta decide que pasa
+    // (siguiente turno, siguiente fase o fin de la ronda si solo queda uno)
     IEnumerator ProcessNextBettingTurn()
     {
         yield return new WaitForSeconds(1f);
-        
-        // Verificar cuantos jugadores activos quedan
-        int activePlayers = gameState.GetActivePlayerCount();
-        if (activePlayers <= 1)
-        {
-            // Solo queda un jugador, terminar ronda
-            StartCoroutine(HandleLastPlayerStanding());
-            yield break;
-        }
-        
-        // Verificar si la ronda de apuestas ha terminado
-        bool roundComplete = true;
-        foreach (var player in gameState.Players)
-        {
-            if (player.State == PlayerState.Active && !player.HasActedThisBettingRound)
-            {
-                roundComplete = false;
-                break;
-            }
-            // Tambien verificar que todos los activos hayan igualado
-            if (player.State == PlayerState.Active && player.CurrentBet < gameState.CurrentHighestBet)
-            {
-                roundComplete = false;
-                break;
-            }
-        }
-        
-        if (roundComplete)
-        {
-            Debug.Log("[ProcessNextBettingTurn] Ronda de apuestas completa");
-            EndBettingRound();
-        }
-        else
-        {
-            // Buscar siguiente jugador activo
-            int nextIndex = GetNextActivePlayer(gameState.CurrentPlayerIndex);
-            Debug.Log($"[ProcessNextBettingTurn] Siguiente jugador: {nextIndex}");
-            gameState.CurrentPlayerIndex = nextIndex;
-            photonView.RPC("RPC_BettingTurnChanged", RpcTarget.All, nextIndex);
-        }
+        Broadcast(GameEngine.PlanBettingStep(gameState));
     }
-    
-    int GetNextActivePlayer(int currentIndex)
+
+    void PresentTurnChanged(TurnChanged e)
     {
-        int count = gameState.Players.Count;
-        for (int i = 1; i <= count; i++)
-        {
-            int nextIndex = (currentIndex + i) % count;
-            if (gameState.Players[nextIndex].State == PlayerState.Active)
-            {
-                return nextIndex;
-            }
-        }
-        return currentIndex;
+        UpdateUI();
+
+        if (CommandValidator.IsBettingPhase(gameState.CurrentPhase))
+            StartBettingRound();
+        else if (gameState.CurrentPhase == GamePhase.Drawing)
+            ShowTransitionScreen();
     }
-    
-    [PunRPC]
-    void RPC_BettingTurnChanged(int newPlayerIndex)
+
+    void PresentPhaseChanged(PhaseChanged e)
     {
-        gameState.CurrentPlayerIndex = newPlayerIndex;
-        StartBettingRound();
-    }
-    
-    void EndBettingRound()
-    {
-        Debug.Log($"[EndBettingRound] Fase actual: {gameState.CurrentPhase}");
-        
-        ShowBettingControls(false);
-        
-        switch (gameState.CurrentPhase)
+        Debug.Log($"[Fase] {e.Phase}");
+
+        switch (e.Phase)
         {
             case GamePhase.FirstBetting:
-                // NUEVO ORDEN: Despues de primera apuesta viene Calling
-                Debug.Log("[EndBettingRound] FirstBetting terminado, avanzando a Calling");
-                photonView.RPC("RPC_StartCallingPhase", RpcTarget.All);
+                gameStateText.text = "Primera ronda de apuestas";
+                UpdateUI();
+                StartBettingRound();
                 break;
-                
+
             case GamePhase.Calling:
-                // Despues de Calling viene el First Shift y luego Drawing
-                Debug.Log("[EndBettingRound] Calling terminado, avanzando a FirstShift");
-                photonView.RPC("RPC_AdvanceToFirstShift", RpcTarget.All);
+                gameStateText.text = "Fase de Calling";
+                UpdateUI();
+                StartBettingRound();
                 break;
-                
+
             case GamePhase.SecondBetting:
-                // Despues de segunda apuesta viene el Second Shift y luego Reveal
-                Debug.Log("[EndBettingRound] SecondBetting terminado, avanzando a SecondShift");
-                photonView.RPC("RPC_AdvanceToSecondShift", RpcTarget.All);
+                gameStateText.text = "Segunda ronda de apuestas";
+                UpdateUI();
+                StartBettingRound();
                 break;
-                
+
+            case GamePhase.FirstShift:
+            case GamePhase.SecondShift:
+                ShowBettingControls(false);
+                gameStateText.text = e.Phase == GamePhase.FirstShift ? " PRIMER SHIFT " : " SEGUNDO SHIFT ";
+                UpdateUI();
+
+                // Solo el Master decide el shift (Broadcast lo envia al terminar este lote)
+                if (PhotonNetwork.IsMasterClient)
+                    TriggerShift(e.Phase == GamePhase.FirstShift ? ShiftKind.First : ShiftKind.Second);
+                break;
+
+            case GamePhase.Drawing:
+                // Ocultar el panel de betting durante Drawing
+                ShowBettingControls(false);
+                UpdateUI();
+                ShowTransitionScreen();
+                break;
+
+            case GamePhase.Reveal:
+                ShowBettingControls(false);
+                StartCoroutine(RevealAllHands());
+                break;
+
             default:
-                Debug.LogWarning($"[EndBettingRound] Fase inesperada: {gameState.CurrentPhase}");
+                UpdateUI();
                 break;
         }
     }
-    
-    [PunRPC]
-    void RPC_AdvanceToFirstShift()
-    {
-        Debug.Log("[RPC_AdvanceToFirstShift] Iniciando First Shift");
-        gameState.CurrentPhase = GamePhase.FirstShift;
-        gameStateText.text = " PRIMER SHIFT ";
-        UpdateUI();
-        
-        // Solo el Master ejecuta la logica del shift
-        if (PhotonNetwork.IsMasterClient)
-        {
-            TriggerFirstShift();
-        }
-    }
-    
-    [PunRPC]
-    void RPC_AdvanceToDrawing()
-    {
-        Debug.Log("[RPC_AdvanceToDrawing] Iniciando fase de Drawing");
-        gameState.CurrentPhase = GamePhase.Drawing;
-        _playersWhoStood = 0;
-        
-        // Resetear para la ronda de apuestas de Drawing
-        foreach (var player in gameState.Players)
-        {
-            player.ResetBettingRound();
-            player.HasDiscardedThisTurn = false;
-        }
-        gameState.CurrentHighestBet = 0;
-        
-        //  empezar desde el jugador 1 (indice 0)
-        gameState.CurrentPlayerIndex = 0;
-        
-        // Buscar primer jugador activo desde el inicio
-        while (gameState.CurrentPlayerIndex < gameState.Players.Count && 
-               gameState.Players[gameState.CurrentPlayerIndex].State != PlayerState.Active)
-        {
-            gameState.CurrentPlayerIndex++;
-        }
-        
-        if (gameState.CurrentPlayerIndex >= gameState.Players.Count)
-            gameState.CurrentPlayerIndex = 0;
-        
-        // Ocultar el panel de betting durante Drawing
-        ShowBettingControls(false);
-        
-        UpdateUI();
-        ShowTransitionScreen();
-    }
-    
-    [PunRPC]
-    void RPC_AdvanceToSecondShift()
-    {
-        gameState.CurrentPhase = GamePhase.SecondShift;
-        gameStateText.text = " SEGUNDO SHIFT ";
-        UpdateUI();
-        
-        // Solo el Master ejecuta la logica del shift
-        if (PhotonNetwork.IsMasterClient)
-        {
-            TriggerSecondShift();
-        }
-    }
-    
-    //  FIN SISTEMA DE APUESTAS 
 
-    void AdvanceToDrawingPhase()
-    {
-        if (!PhotonNetwork.IsMasterClient) return;
-        gameState.CurrentPhase = GamePhase.Drawing;
-        photonView.RPC("RPC_StartDrawingPhase", RpcTarget.All);
-    }
-
-    [PunRPC]
-    void RPC_StartDrawingPhase()
-    {
-        _playersWhoStood = 0;
-        ShowTransitionScreen();
-    }
+    //  FIN SISTEMA DE APUESTAS
 
     void ShowTransitionScreen()
     {
@@ -2380,40 +1691,14 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
         SubmitCommand(CommandType.Draw);
     }
 
-    // Master: roba del mazo real (solo el Master lo tiene) y avisa a todos
-    string ExecuteDraw(int seat)
+    void PresentCardDrawn(CardDrawn e)
     {
-        if (gameState.MainDeck.GetCount() <= 0)
-            return "No quedan cartas en el mazo.";
-
-        SabaccCard drawnCard = gameState.MainDeck.Draw();
-        gameState.Players[seat].Hand.AddCard(drawnCard);
-        
-        photonView.RPC(nameof(RPC_PlayerDrewCard), RpcTarget.All, seat, drawnCard.GetCardId());
-        return null;
-    }
-
-    [PunRPC]
-    void RPC_PlayerDrewCard(int playerIndex, string cardId, PhotonMessageInfo info)
-    {
-        if (!IsFromMaster(info)) return; // solo el Master emite eventos de partida
-        OnCommandResolved(playerIndex);
+        OnCommandResolved(e.PlayerIndex);
 
         // Sonido de robar carta
         if (AudioManager.Instance != null) AudioManager.Instance.PlayCardDeal();
-        
-        // Solo los clientes (no el Master) necesitan anadir la carta al modelo
-        // porque el Master ya la anadio en ExecuteDraw
-        if (!PhotonNetwork.IsMasterClient)
-        {
-            var card = SabaccCardDefinitions.GetCardById(cardId);
-            if (card != null)
-            {
-                gameState.Players[playerIndex].Hand.AddCard(card);
-            }
-        }
-        
-        StartCoroutine(AnimateDrawCardNetwork(playerIndex, cardId));
+
+        StartCoroutine(AnimateDrawCardNetwork(e.PlayerIndex, e.CardId));
     }
 
     IEnumerator AnimateDrawCardNetwork(int playerIndex, string cardId)
@@ -2520,25 +1805,11 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
         SubmitCommand(CommandType.Stand);
     }
 
-    // Master: pasa el turno al siguiente jugador activo y avisa a todos
-    void ExecuteStand(int seat)
+    void PresentPlayerStood(PlayerStood e)
     {
-        gameLogic.NextPlayer(gameState);
-        _playersWhoStood++;
-        
-        photonView.RPC(nameof(RPC_PlayerStood), RpcTarget.All, seat, _playersWhoStood, gameState.CurrentPlayerIndex);
-    }
+        OnCommandResolved(e.PlayerIndex);
 
-    [PunRPC]
-    void RPC_PlayerStood(int playerWhoStood, int totalStood, int nextPlayerIndex, PhotonMessageInfo info)
-    {
-        if (!IsFromMaster(info)) return; // solo el Master emite eventos de partida
-        OnCommandResolved(playerWhoStood);
-
-        _playersWhoStood = totalStood;
-        gameState.CurrentPlayerIndex = nextPlayerIndex; // Sincronizar indice del jugador actual
-        
-        gameStateText.text = $"{gameState.Players[playerWhoStood].Name} se planta.";
+        gameStateText.text = $"{gameState.Players[e.PlayerIndex].Name} se planta.";
         DisableAllButtons();
 
         if (AllPlayersStood())
@@ -2552,67 +1823,12 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
         }
     }
 
-    bool AllPlayersStood() => _playersWhoStood >= gameState.GetActivePlayerCount();
+    bool AllPlayersStood() => gameState.PlayersStood >= gameState.GetActivePlayerCount();
 
     void AdvanceAfterDrawing()
     {
         if (!PhotonNetwork.IsMasterClient) return;
-
-        photonView.RPC("RPC_StartSecondBettingPhase", RpcTarget.All);
-    }
-    
-    [PunRPC]
-    void RPC_StartSecondBettingPhase()
-    {
-        Debug.Log("[RPC_StartSecondBettingPhase] Iniciando segunda ronda de apuestas");
-        gameState.CurrentPhase = GamePhase.SecondBetting;
-        gameState.CallerIndex = -1;
-        
-        // Resetear apuestas de todos los jugadores
-        foreach (var player in gameState.Players)
-        {
-            player.ResetBettingRound();
-        }
-        gameState.CurrentHighestBet = 0;
-        _bettingRoundStarter = 0;
-        
-        gameState.CurrentPlayerIndex = 0;
-        
-        // Buscar primer jugador activo
-        while (gameState.CurrentPlayerIndex < gameState.Players.Count && 
-               gameState.Players[gameState.CurrentPlayerIndex].State != PlayerState.Active)
-        {
-            gameState.CurrentPlayerIndex++;
-        }
-        
-        if (gameState.CurrentPlayerIndex >= gameState.Players.Count)
-            gameState.CurrentPlayerIndex = 0;
-        
-        gameStateText.text = "Segunda ronda de apuestas";
-        UpdateUI();
-        StartBettingRound();
-    }
-
-    string[] SerializeAllHands()
-    {
-        List<string> cards = new List<string>();
-        foreach (var player in gameState.Players)
-        {
-            foreach (var card in player.Hand.GetCards())
-            {
-                cards.Add(card.GetCardId());
-            }
-            // Anadir separador para saber donde termina la mano de cada jugador
-            cards.Add("|"); 
-        }
-        return cards.ToArray();
-    }
-
-    [PunRPC]
-    void RPC_StartRevealPhase()
-    {
-        gameState.CurrentPhase = GamePhase.Reveal;
-        StartCoroutine(RevealAllHands());
+        Broadcast(GameEngine.PlanPhaseStart(gameState, GamePhase.SecondBetting));
     }
 
     IEnumerator RevealAllHands()
@@ -2623,332 +1839,115 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
         yield return AnimationManager.Instance.RevealAllHands(_cardInstances.ToArray(), () =>
         {
             UpdateAllPlayersHandValues();
+
+            // Solo el Master liquida la ronda: penalizaciones y botes (GameEngine.SettleRound).
+            // Antes esas penalizaciones solo se aplicaban en el Master y los clientes veian otros creditos.
             if (PhotonNetwork.IsMasterClient)
-                ProcessRoundResult();
+                Broadcast(GameEngine.SettleRound(gameState, _rules));
         });
     }
 
-    void ProcessRoundResult()
+    // El dinero ya se movio con PenaltyPaid/PotAwarded; aqui solo se muestra el resultado
+    void PresentRoundEnded(RoundEnded e)
     {
-        if (!PhotonNetwork.IsMasterClient) return;
+        ShowBettingControls(false);
 
-        // Aplicar penalizacion por bombed out
-        int[] handValues = new int[gameState.Players.Count];
-        bool[] bombedOut = new bool[gameState.Players.Count];
-        
-        for (int i = 0; i < gameState.Players.Count; i++)
-        {
-            Player player = gameState.Players[i];
-            int total = player.Hand.GetTotal();
-            handValues[i] = total;
-            bombedOut[i] = (total > 23 || total < -23 || total == 0);
-            
-            // Penalizacion por bombed out
-            if (bombedOut[i] && player.State == PlayerState.Active)
-            {
-                int penalty = Mathf.Min(bombedOutPenalty, player.Credits);
-                player.DeductCredits(penalty);
-                gameState.SabaccPot += penalty;
-                player.MarkAsBombedOut();
-            }
-        }
+        string winnerName = e.WinnerIndex >= 0 ? gameState.Players[e.WinnerIndex].Name : "";
+        string allHands = e.HandValues.Length > 0 ? BuildAllHandsString(e.HandValues, e.BombedOut) : "";
+        bool isGameWin = e.Outcome == RoundOutcome.DefinitiveWin; // Sabacc Puro o Mano del Idiota terminan la partida
+        string mensaje;
 
-        Player winner = gameLogic.GetDefinitiveWinner(gameState, out string handType);
-        
-        // Penalizacion por call fallido
-        if (gameState.SomeoneCalled)
+        switch (e.Outcome)
         {
-            Player callerPlayer = gameState.Players[gameState.CallerIndex];
-            bool callerWon = (winner != null && gameState.Players.IndexOf(winner) == gameState.CallerIndex);
-            
-            if (!callerWon && callerPlayer.State != PlayerState.Folded)
-            {
-                int penalty = Mathf.Min(callPenalty, callerPlayer.Credits);
-                callerPlayer.DeductCredits(penalty);
-                gameState.SabaccPot += penalty;
-            }
-        }
-        
-        if (winner != null)
-        {
-            // Victoria definitiva: Sabacc Puro o Mano del Idiota
-            int winnerIndex = gameState.Players.IndexOf(winner);
-            int totalWon = gameState.HandPot + gameState.SabaccPot;
-            int winnerHandValue = winner.Hand.GetTotal();
-            
-            // gameLogic.AwardHandPot(gameState, winner);
-            // gameLogic.AwardSabaccPot(gameState, winner);
-            
-            photonView.RPC("RPC_ShowWinner", RpcTarget.All,
-                winnerIndex, handType, totalWon, winnerHandValue, handValues, bombedOut);
-        }
-        else
-        {
-            // No hay victoria definitiva - buscar mejor mano
-            Player bestHand = gameLogic.GetBestHandForRound(gameState);
-            if (bestHand != null)
-            {
-                // Victoria de ronda normal: solo Hand Pot
-                // El Sabacc Pot persiste
-                int bestHandIndex = gameState.Players.IndexOf(bestHand);
-                int handPotAmount = gameState.HandPot;
-                int bestHandValue = bestHand.Hand.GetTotal();
-                
-                // no dar premios aqui - se hace en el RPC para sincronizar
-                // gameLogic.AwardHandPot(gameState, bestHand);
-                
-                photonView.RPC("RPC_ShowBestHand", RpcTarget.All,
-                    bestHandIndex, handPotAmount, gameState.SabaccPot, bestHandValue, handValues, bombedOut);
-            }
-            else
-            {
-                // Todos bombed out - los botes persisten
-                photonView.RPC("RPC_ShowAllBombedOut", RpcTarget.All, handValues, bombedOut);
-            }
-        }
-    }
+            case RoundOutcome.DefinitiveWin:
+                if (AudioManager.Instance != null) AudioManager.Instance.PlaySabacc();
+                mensaje = $"{winnerName} GANA LA PARTIDA!\nCon {e.HandType} ({e.WinnerHandValue} puntos)\nGana {e.AmountWon} creditos!\n{allHands}\nFIN DE LA PARTIDA!";
+                break;
 
-    [PunRPC]
-    void RPC_ShowWinner(int winnerIndex, string handType, int totalWon, int winnerHandValue, int[] handValues, bool[] bombedOut)
-    {
-        Player winner = gameState.Players[winnerIndex];
-        string winnerName = winner.Name;
-        
-        // Construir mensaje con todas las manos
-        string allHands = BuildAllHandsString(handValues, bombedOut);
-        
-        // Sabacc puro o Mano del Idiota terminan la partida
-        bool isGameWin = handType.ToLower().Contains("sabacc") || handType.ToLower().Contains("idiota");
-        
-        // Actualizar creditos del ganador en todos los clientes
-        if (isGameWin)
-        {
-            winner.AddCredits(totalWon); // totalWon = HandPot + SabaccPot
-            gameState.HandPot = 0;
-            gameState.SabaccPot = 0;
-        }
-        else
-        {
-            // Victoria de ronda normal: solo Hand Pot
-            winner.AddCredits(gameState.HandPot);
-            int sabaccPotRemaining = gameState.SabaccPot; // Persiste
-            gameState.HandPot = 0;
-        }
-        
-        // Sonido segun resultado
-        if (AudioManager.Instance != null)
-        {
-            if (isGameWin)
-            {
-                AudioManager.Instance.PlaySabacc();
-            }
-            else if (winnerIndex == localPlayerIndex)
-            {
-                AudioManager.Instance.PlayWin();
-            }
-            else
-            {
-                AudioManager.Instance.PlayLose();
-            }
-        }
-        
-        /*
-        if (isGameWin)
-        {
-            gameStateText.text = $"{winnerName} GANA LA PARTIDA!\n" +
-                                $"Con {handType} ({winnerHandValue} puntos)\n" +
-                                $"Gana {totalWon} creditos!\n\n" +
-                                allHands +
-                                "\n\nFIN DE LA PARTIDA!";
-        }
-        else
-        {
-            int handPotWon = totalWon - gameState.SabaccPot;
-            gameStateText.text = $"{winnerName} GANA LA RONDA!\n" +
-                                $"Mejor mano: {winnerHandValue} puntos\n" +
-                                $"Gana bote de mano: {handPotWon} creditos\n" +
-                                $"Bote Sabacc ({gameState.SabaccPot}) persiste\n\n" +
-                                allHands +
-                                "\n\nSiguiente ronda...";
-        }
-        */
+            case RoundOutcome.BestHand:
+                if (AudioManager.Instance != null)
+                {
+                    if (e.WinnerIndex == localPlayerIndex)
+                    {
+                        AudioManager.Instance.PlayWin();
+                        AudioManager.Instance.PlayChipsCollect();
+                    }
+                    else
+                    {
+                        AudioManager.Instance.PlayLose();
+                    }
+                }
+                mensaje = $" {winnerName} gana la ronda\n" +
+                          $"Mejor mano: {e.WinnerHandValue} puntos\n" +
+                          $"Gana bote de mano: {e.AmountWon} creditos\n" +
+                          $"Bote Sabacc ({gameState.SabaccPot}) persiste\n" +
+                          allHands;
+                break;
 
-        string mensaje = isGameWin
-        ? $"{winnerName} GANA LA PARTIDA!\nCon {handType} ({winnerHandValue} puntos)\nGana {totalWon} creditos!\n{allHands}\nFIN DE LA PARTIDA!"
-        : $"{winnerName} GANA LA RONDA!\nMejor mano: {winnerHandValue} puntos\nGana bote de mano: {totalWon - gameState.SabaccPot} creditos\nBote Sabacc ({gameState.SabaccPot}) persiste\n{allHands}\nSiguiente ronda...";
+            case RoundOutcome.AllBombedOut:
+                if (AudioManager.Instance != null) AudioManager.Instance.PlayBombedOut();
+                mensaje = "Todos Bombed Out!\n" +
+                          "Los botes persisten para la siguiente ronda\n" +
+                          allHands;
+                break;
+
+            default: // LastPlayerStanding
+                mensaje = $"{winnerName} gana {e.AmountWon} creditos!\n" +
+                          "Todos los demas se retiraron.";
+                break;
+        }
 
         MostrarPanelFinal(mensaje);
-        
-        UpdateAllPlayersHandValues();
+
+        if (e.HandValues.Length > 0)
+            UpdateAllPlayersHandValues();
         UpdateUI();
-        
+
         if (PhotonNetwork.IsMasterClient)
         {
+            // Tiempo para leer el mensaje
             if (isGameWin)
-            {
                 StartCoroutine(DelayedRestartGame(10f));
-            }
             else
-            {
                 StartCoroutine(DelayedPrepareNextRound(8f));
-            }
         }
     }
-    
+
     IEnumerator DelayedPrepareNextRound(float delay)
     {
         yield return new WaitForSeconds(delay);
         PrepareNextRound();
     }
-    
+
     IEnumerator DelayedRestartGame(float delay)
     {
         yield return new WaitForSeconds(delay);
         RestartGame();
     }
-    
+
     void RestartGame()
     {
         if (!PhotonNetwork.IsMasterClient) return;
-         // Reiniciar creditos de todos los jugadores
-        foreach (var player in gameState.Players)
-        {
-            player.Credits = startingCredits;
-            player.ResetForRound();
-        }
-        
-        gameState.HandPot = 0;
-        gameState.SabaccPot = 0;
-        gameState.CurrentRound = 0;
-        gameState.DealerIndex = 0;
-        
-        // Serializar creditos
-        int[] playerCredits = new int[gameState.Players.Count];
-        for (int i = 0; i < gameState.Players.Count; i++)
-        {
-            playerCredits[i] = startingCredits;
-        }
-        
-        photonView.RPC("RPC_RestartGame", RpcTarget.All, playerCredits);
+        Broadcast(new GameRestarted { StartingCredits = _rules.StartingCredits });
     }
-    
-    [PunRPC]
-    void RPC_RestartGame(int[] playerCredits)
+
+    void PresentGameRestarted(GameRestarted e)
     {
-        // Resetear estado
-        for (int i = 0; i < gameState.Players.Count && i < playerCredits.Length; i++)
-        {
-            gameState.Players[i].Credits = playerCredits[i];
-            gameState.Players[i].ResetForRound();
-        }
-        
-        gameState.HandPot = 0;
-        gameState.SabaccPot = 0;
-        gameState.CallerIndex = -1;
-        gameState.CurrentHighestBet = 0;
-        
         CleanupAllCards();
-        
+
         gameStateText.text = "Nueva partida comenzando...";
         UpdateUI();
-        
+
         if (PhotonNetwork.IsMasterClient)
         {
             StartCoroutine(DelayedStartNewRound(2f));
         }
     }
-    
+
     IEnumerator DelayedStartNewRound(float delay)
     {
         yield return new WaitForSeconds(delay);
         StartNewRound();
-    }
-
-    [PunRPC]
-    void RPC_ShowBestHand(int winnerIndex, int handPotWon, int sabaccPotRemaining, int winnerHandValue, int[] handValues, bool[] bombedOut)
-    {
-        Debug.Log($"[RPC_ShowBestHand] Ganador: {winnerIndex}, Pot: {handPotWon}, IsMaster: {PhotonNetwork.IsMasterClient}");
-        
-        Player winner = gameState.Players[winnerIndex];
-        string winnerName = winner.Name;
-        
-        // Sonido segun si gane o perdi
-        if (AudioManager.Instance != null)
-        {
-            if (winnerIndex == localPlayerIndex)
-            {
-                AudioManager.Instance.PlayWin();
-                AudioManager.Instance.PlayChipsCollect();
-            }
-            else
-            {
-                AudioManager.Instance.PlayLose();
-            }
-        }
-        
-        // Actualizar creditos del ganador en todos los clientes
-        winner.AddCredits(handPotWon);
-        gameState.HandPot = 0;
-        gameState.SabaccPot = sabaccPotRemaining;
-        
-        string allHands = BuildAllHandsString(handValues, bombedOut);
-        
-        /*
-        gameStateText.text = $" {winnerName} gana la ronda\n" +
-                            $"Mejor mano: {winnerHandValue} puntos\n" +
-                            $"Gana bote de mano: {handPotWon} creditos\n" +
-                            $"Bote Sabacc ({sabaccPotRemaining}) persiste\n\n" +
-                            allHands;
-        */
-
-        string mensaje = $" {winnerName} gana la ronda\n" +
-                     $"Mejor mano: {winnerHandValue} puntos\n" +
-                     $"Gana bote de mano: {handPotWon} creditos\n" +
-                     $"Bote Sabacc ({sabaccPotRemaining}) persiste\n" +
-                     allHands;
-
-        MostrarPanelFinal(mensaje);
-
-        UpdateAllPlayersHandValues();
-        UpdateUI();
-        
-        if (PhotonNetwork.IsMasterClient)
-        {
-            Debug.Log("[RPC_ShowBestHand] Master programando PrepareNextRound en 8 segundos");
-            StartCoroutine(DelayedPrepareNextRound(8f));
-        }
-    }
-
-    [PunRPC]
-    void RPC_ShowAllBombedOut(int[] handValues, bool[] bombedOut)
-    {
-        Debug.Log($"[RPC_ShowAllBombedOut] IsMaster: {PhotonNetwork.IsMasterClient}");
-        
-        // Sonido de bombed out
-        if (AudioManager.Instance != null) AudioManager.Instance.PlayBombedOut();
-        
-        string allHands = BuildAllHandsString(handValues, bombedOut);
-        
-        /*
-        gameStateText.text = $"Todos Bombed Out!\n" +
-                            $"Los botes persisten para la siguiente ronda\n\n" +
-                            allHands;
-        */
-
-        string mensaje = $"Todos Bombed Out!\n" +
-                     $"Los botes persisten para la siguiente ronda\n" +
-                     allHands;
-
-        MostrarPanelFinal(mensaje);
-
-        UpdateAllPlayersHandValues();
-        UpdateUI();
-        
-        if (PhotonNetwork.IsMasterClient)
-        {
-            Debug.Log("[RPC_ShowAllBombedOut] Master programando PrepareNextRound en 8 segundos");
-            StartCoroutine(DelayedPrepareNextRound(8f));
-        }
     }
 
     string BuildAllHandsString(int[] handValues, bool[] bombedOut)
@@ -2990,8 +1989,8 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
 
         if (PhotonNetwork.IsMasterClient)
         {
-            Debug.Log("[RPC_CleanupRound] Rotando dealer y empezando nueva ronda");
-            gameLogic.RotateDealer(gameState);
+            // El nuevo dealer lo decide GameEngine.PlanRoundStart
+            Debug.Log("[RPC_CleanupRound] Empezando nueva ronda");
             StartNewRound();
         }
     }
@@ -3322,35 +2321,10 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
         SubmitCommand(CommandType.Discard, _selectedCardIndex);
     }
 
-    // Master: quita la carta de la mano, la pone en el descarte y avisa a todos
-    void ExecuteDiscard(int seat, int cardIndex)
+    void PresentCardDiscarded(CardDiscarded e)
     {
-        Player player = gameState.Players[seat];
-        SabaccCard discarded = player.Hand.RemoveCardAt(cardIndex);
-        gameState.DiscardPile.Discard(discarded);
-        
-        photonView.RPC(nameof(RPC_PlayerDiscarded), RpcTarget.All, seat, cardIndex, discarded.GetCardId());
-    }
-
-    [PunRPC]
-    void RPC_PlayerDiscarded(int playerIndex, int cardIndex, string cardId, PhotonMessageInfo info)
-    {
-        if (!IsFromMaster(info)) return; // solo el Master emite eventos de partida
-        OnCommandResolved(playerIndex);
-        // Tras descartar, ese jugador solo puede plantarse (lo valida CommandValidator)
-        gameState.Players[playerIndex].HasDiscardedThisTurn = true;
-
-        // Si no soy el Master, actualizar el modelo de datos
-        if (!PhotonNetwork.IsMasterClient)
-        {
-            Player player = gameState.Players[playerIndex];
-            if (cardIndex < player.Hand.GetCount())
-            {
-                player.Hand.RemoveCardAt(cardIndex);
-            }
-        }
-
-        StartCoroutine(AnimateDiscardCard(playerIndex, cardIndex));
+        OnCommandResolved(e.PlayerIndex);
+        StartCoroutine(AnimateDiscardCard(e.PlayerIndex, e.CardIndex));
     }
 
     IEnumerator AnimateDiscardCard(int playerIndex, int cardIndex)
@@ -3443,16 +2417,6 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
         SubmitCommand(CommandType.Unprotect, _selectedCardIndex);
     }
 
-    // Master: marca/desmarca la carta como protegida y avisa a todos
-    void ExecuteSetProtected(int seat, int cardIndex, bool isProtected)
-    {
-        SabaccCard card = gameState.Players[seat].Hand.GetCards()[cardIndex];
-        card.SetProtected(isProtected);
-
-        string eventName = isProtected ? nameof(RPC_CardProtected) : nameof(RPC_CardUnprotected);
-        photonView.RPC(eventName, RpcTarget.All, seat, cardIndex, card.GetCardId());
-    }
-
     int GetProtectedCardCount(int playerIndex)
     {
         if (playerIndex < 0 || playerIndex >= gameState.Players.Count) return 0;
@@ -3465,44 +2429,15 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
         return count;
     }
 
-    [PunRPC]
-    void RPC_CardProtected(int playerIndex, int cardIndex, string cardId, PhotonMessageInfo info)
+    void PresentCardProtectionChanged(CardProtectionChanged e)
     {
-        if (!IsFromMaster(info)) return; // solo el Master emite eventos de partida
-        OnCommandResolved(playerIndex);
+        OnCommandResolved(e.PlayerIndex);
 
-        // Actualizar modelo de datos si no soy Master
-        if (!PhotonNetwork.IsMasterClient)
-        {
-            Player player = gameState.Players[playerIndex];
-            if (cardIndex < player.Hand.GetCount())
-            {
-                player.Hand.GetCards()[cardIndex].SetProtected(true);
-            }
-        }
-
-        // Animar carta al campo de interferencia
-        StartCoroutine(AnimateProtectCard(playerIndex, cardIndex, cardId));
-    }
-
-    [PunRPC]
-    void RPC_CardUnprotected(int playerIndex, int cardIndex, string cardId, PhotonMessageInfo info)
-    {
-        if (!IsFromMaster(info)) return; // solo el Master emite eventos de partida
-        OnCommandResolved(playerIndex);
-
-        // Actualizar modelo de datos si no soy Master
-        if (!PhotonNetwork.IsMasterClient)
-        {
-            Player player = gameState.Players[playerIndex];
-            if (cardIndex < player.Hand.GetCount())
-            {
-                player.Hand.GetCards()[cardIndex].SetProtected(false);
-            }
-        }
-
-        // Animar carta de vuelta a la mano
-        StartCoroutine(AnimateUnprotectCard(playerIndex, cardIndex, cardId));
+        // Animar carta al campo de interferencia, o de vuelta a la mano
+        if (e.IsProtected)
+            StartCoroutine(AnimateProtectCard(e.PlayerIndex, e.CardIndex, e.CardId));
+        else
+            StartCoroutine(AnimateUnprotectCard(e.PlayerIndex, e.CardIndex, e.CardId));
     }
 
     IEnumerator AnimateProtectCard(int playerIndex, int cardIndex, string cardId)
@@ -3879,76 +2814,30 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
             return;
         }
 
-        // Si el juego esta en curso, actualizar el estado
-        if (gameState != null)
+        // Todos reciben este callback, pero solo el Master lo convierte en evento:
+        // asi el cambio de estado llega a todos por el mismo camino
+        if (gameState == null || !PhotonNetwork.IsMasterClient) return;
+
+        int leftPlayerIndex = SeatIndexOf(otherPlayer);
+        if (leftPlayerIndex < 0) return;
+
+        var events = new List<GameEvent> { new PlayerLeft { PlayerIndex = leftPlayerIndex } };
+
+        // Si era su turno, pasa al siguiente jugador activo
+        if (gameState.CurrentPlayerIndex == leftPlayerIndex)
         {
-            // Encontrar el asiento del jugador que salio (por su id, no por "ActorNumber - 1")
-            int leftPlayerIndex = SeatIndexOf(otherPlayer);
-
-            // Si ese jugador estaba en la partida, marcarlo como retirado
-            if (leftPlayerIndex >= 0 && leftPlayerIndex < gameState.Players.Count)
-            {
-                gameState.Players[leftPlayerIndex].Fold();
-                gameStateText.text = $"{otherPlayer.NickName} abandono la partida.";
-
-                // Actualizar UI
-                UpdateUI();
-
-                // Si era el turno del jugador que salio, avanzar al siguiente
-                if (gameState.CurrentPlayerIndex == leftPlayerIndex && PhotonNetwork.IsMasterClient)
-                {
-                    // Buscar siguiente jugador activo
-                    int nextActive = GetNextActivePlayerFromIndex(leftPlayerIndex);
-                    if (nextActive >= 0)
-                    {
-                        gameState.CurrentPlayerIndex = nextActive;
-                        photonView.RPC("RPC_UpdateCurrentPlayer", RpcTarget.All, nextActive);
-                    }
-                }
-            }
+            int next = GameEngine.NextActiveSeat(gameState, leftPlayerIndex);
+            if (next != leftPlayerIndex)
+                events.Add(new TurnChanged { PlayerIndex = next });
         }
+
+        Broadcast(events);
     }
 
-    // Busca el siguiente jugador activo desde un indice
-    int GetNextActivePlayerFromIndex(int fromIndex)
+    void PresentPlayerLeft(PlayerLeft e)
     {
-        if (gameState == null) return -1;
-
-        int count = gameState.Players.Count;
-        for (int i = 1; i <= count; i++)
-        {
-            int nextIndex = (fromIndex + i) % count;
-            if (gameState.Players[nextIndex].State == PlayerState.Active)
-            {
-                return nextIndex;
-            }
-        }
-        return -1;
-    }
-
-    [PunRPC]
-    void RPC_UpdateCurrentPlayer(int newIndex)
-    {
-        if (gameState != null)
-        {
-            gameState.CurrentPlayerIndex = newIndex;
-            UpdateUI();
-            
-            // Si es mi turno, mostrar controles
-            if (newIndex == localPlayerIndex)
-            {
-                if (gameState.CurrentPhase == GamePhase.Drawing)
-                {
-                    ShowTransitionScreen();
-                }
-                else if (gameState.CurrentPhase == GamePhase.FirstBetting || 
-                         gameState.CurrentPhase == GamePhase.SecondBetting ||
-                         gameState.CurrentPhase == GamePhase.Calling)
-                {
-                    StartBettingRound();
-                }
-            }
-        }
+        gameStateText.text = $"{gameState.Players[e.PlayerIndex].Name} abandono la partida.";
+        UpdateUI();
     }
 
     // Callback cuando cambia el Master Client (si el anterior se fue)

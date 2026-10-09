@@ -1,5 +1,5 @@
 /// <summary>
-/// Parámetros de reglas que el validador necesita conocer. Se construye desde
+/// Parámetros de reglas que necesitan el validador y el motor. Se construye desde
 /// los campos del inspector de NetworkGameController; en los tests se crea a mano.
 /// </summary>
 public sealed class RulesConfig
@@ -18,4 +18,16 @@ public sealed class RulesConfig
 
     /// <summary>Penalización por retirarse en la primera ronda de apuestas (va al bote de Sabacc)</summary>
     public int FoldPenaltyFirstBetting = 10;
+
+    /// <summary>Créditos con los que empieza (o reempieza) cada jugador</summary>
+    public int StartingCredits = 100;
+
+    /// <summary>Apuesta inicial a CADA bote al empezar la ronda (se paga el doble en total)</summary>
+    public int InitialBet = 10;
+
+    /// <summary>Penalización por explotar (bomb out) en la revelación</summary>
+    public int BombedOutPenalty = 50;
+
+    /// <summary>Penalización por hacer CALL y no ganar la ronda</summary>
+    public int CallPenalty = 10;
 }

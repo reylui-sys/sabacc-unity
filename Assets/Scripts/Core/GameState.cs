@@ -22,6 +22,8 @@ public class GameState
     private bool isRoundActive;
     private int currentHighestBet;
     private int callerIndex = -1;
+    private int playersStood;
+    private bool deckIsKnown;
 
     // ===== PROPIEDADES PÚBLICAS (SOLO LECTURA) =====
 
@@ -109,6 +111,24 @@ public class GameState
     }
 
     public bool SomeoneCalled => callerIndex >= 0;
+
+    /// <summary>Jugadores que ya se han plantado en la fase de robo actual</summary>
+    public int PlayersStood
+    {
+        get { return playersStood; }
+        set { playersStood = value; }
+    }
+
+    /// <summary>
+    /// true solo en la autoridad (el Master): es quien tiene el mazo real.
+    /// Los clientes no conocen el orden del mazo (información oculta), así que
+    /// el reducer crea las cartas a partir de su ID en lugar de sacarlas del mazo.
+    /// </summary>
+    public bool DeckIsKnown
+    {
+        get { return deckIsKnown; }
+        set { deckIsKnown = value; }
+    }
 
     /// <summary>Cuánto le falta a un jugador para igualar la apuesta más alta</summary>
     public int AmountToCall(Player player)

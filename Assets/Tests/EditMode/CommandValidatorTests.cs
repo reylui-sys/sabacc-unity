@@ -22,6 +22,7 @@ namespace Sabacc.Core.Tests
         {
             _rules = new RulesConfig();
             _state = Game(100, 1, 3);           // Ana (asiento 0) y Bea (asiento 1)
+            _state.IsRoundActive = true;
             _state.CurrentPlayerIndex = 0;      // turno de Ana
             GiveHand(_state, 0, Coins(5), Coins(6), Coins(7));
             GiveHand(_state, 1, Coins(2), Coins(3));
@@ -55,6 +56,17 @@ namespace Sabacc.Core.Tests
             _state.CurrentPhase = GamePhase.FirstBetting;
             _state.Players[0].Fold();
             Invalid(Validate(CommandType.Check, Ana));
+        }
+
+        [Test]
+        public void Rechaza_CualquierAccion_SiLaRondaHaTerminado()
+        {
+            // P. ej. todos se retiran menos Ana: mientras se muestra el resultado,
+            // un "Pasar" suyo no debe volver a liquidar la ronda
+            _state.CurrentPhase = GamePhase.FirstBetting;
+            _state.IsRoundActive = false;
+            Invalid(Validate(CommandType.Check, Ana));
+            Invalid(Validate(CommandType.Fold, Ana));
         }
 
         [Test]

@@ -1,6 +1,6 @@
 # ADR 0003 — Acciones de jugador como comandos validados por el Master
 
-- **Estado:** aceptada
+- **Estado:** aceptada (ampliada por [ADR 0004](0004-un-unico-camino-para-cambiar-el-estado.md))
 - **Fecha:** 2026-10-09
 
 ## Contexto

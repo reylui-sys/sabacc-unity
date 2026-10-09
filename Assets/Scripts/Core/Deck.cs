@@ -15,7 +15,12 @@ public class Deck : CardCollection
     // Método para barajar
     public void Shuffle()
     {
-        var rand = new Random();  // Generador aleatorio
+        Shuffle(new Random());
+    }
+
+    // Baraja con un generador concreto (con semilla fija, el orden es reproducible)
+    public void Shuffle(Random rand)
+    {
         int n = GetCount(); // Número de cartas
     
         // Mientras aun hayan cartas para barajar
@@ -53,6 +58,29 @@ public class Deck : CardCollection
     public bool RemoveCard(SabaccCard cardToRemove)
     {
         return cards.Remove(cardToRemove);
+    }
+
+    // Saca del mazo la carta más alta (la más cercana a la cima) con ese ID.
+    // Devuelve null si no hay ninguna.
+    public SabaccCard TakeById(string cardId)
+    {
+        for (int i = cards.Count - 1; i >= 0; i--)
+        {
+            if (cards[i].GetCardId() == cardId)
+            {
+                SabaccCard card = cards[i];
+                cards.RemoveAt(i);
+                return card;
+            }
+        }
+        return null;
+    }
+
+    // ID de la carta que está n posiciones por debajo de la cima (0 = la cima), o null
+    public string PeekIdFromTop(int n)
+    {
+        int index = cards.Count - 1 - n;
+        return index >= 0 ? cards[index].GetCardId() : null;
     }
 
     // Método para añadir una carta al fondo del mazo (para el shifting)

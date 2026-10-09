@@ -23,7 +23,7 @@ public class DiscardPile : CardCollection
   }
 
   // Método para obtener todas las cartas descartadas (para el shifting)
-  // Este método es importante para que ApplyShifting no genere duplicados
+  // Devuelve una copia: quien la recorra no puede modificar la pila por accidente
   public List<SabaccCard> GetAllDiscarded()
   {
     return new List<SabaccCard>(cards);

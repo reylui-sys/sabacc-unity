@@ -32,7 +32,9 @@ Es un proyecto universitario de grupo (L1-G1). Este repositorio contiene el esta
 Assets/
 ├── Scripts/
 │   ├── Core/              ← reglas del juego en C# puro (asmdef Sabacc.Core, sin UnityEngine)
-│   │   └── Commands/      ← comandos de jugador y su validador
+│   │   ├── Commands/      ← comandos de jugador y su validador
+│   │   ├── Engine/        ← GameEngine: decide qué pasa y lo devuelve como eventos
+│   │   └── Events/        ← eventos, su codificación para la red y el reducer
 │   ├── Controller/        ← flujo de partida en red, animaciones, audio, tutorial
 │   ├── View/              ← vista de cartas y mapa de prefabs
 │   ├── Infrastructure/    ← puentes entre el núcleo y Unity (p. ej. log)
@@ -65,9 +67,21 @@ Los jugadores no cambian la partida directamente: envían **comandos** (`Draw`, 
 
 Los eventos solo se aceptan si vienen del Master. Así se acaban el doble clic, los turnos saltados y las reglas duplicadas por la UI.
 
+### Un único camino para cambiar el estado
+
+```
+cliente ──comando──► Master: GameEngine ──eventos──► todos (Master incluido): GameReducer.Apply + animación
+```
+
+- **`GameEngine`** decide qué pasa (comandos, inicio de ronda, shifting, apuestas, liquidación) y lo devuelve como **eventos**, sin modificar nada.
+- **`GameReducer.Apply`** es la **única** función que modifica el estado de la partida.
+- Master y clientes aplican los mismos eventos con el mismo reducer, así que no pueden ver partidas distintas. El Master no aplica nada por su cuenta: recibe sus propios eventos por el mismo RPC que los demás.
+- El controlador de red solo presenta (animaciones, textos, sonidos). Antes tenía 76 asignaciones directas al estado; ahora ninguna.
+- Solo el Master conoce el orden del mazo: es información oculta y no viaja por la red.
+
 ### Tests
 
-82 tests EditMode cubren el validador de comandos (qué acciones son legales en cada fase), las manos (bomb out, Sabacc Puro, Mano del Idiota), el mazo y los IDs de carta, la mejor mano y los desempates, los turnos, las apuestas, el shifting y los asientos. Los de shifting destaparon un bug real: con las cartas especiales duplicadas, una misma carta podía quedar a la vez en una mano y en el mazo.
+126 tests EditMode. El más importante es el de **convergencia**: simula 300 partidas completas con un Master y dos clientes que solo reciben los eventos codificados en bytes, y tras cada mensaje comprueba que los tres ven exactamente lo mismo, que no se crea ni se destruye dinero y que ninguna carta se duplica. Los demás cubren el motor, el reducer, la codificación de eventos, el validador de comandos, las manos (bomb out, Sabacc Puro, Mano del Idiota), el mazo y los IDs de carta, la mejor mano y los desempates, los turnos, las apuestas, el shifting y los asientos. Los de shifting destaparon un bug real: con las cartas especiales duplicadas, una misma carta podía quedar a la vez en una mano y en el mazo.
 
 Para ejecutarlos: *Window → General → Test Runner → EditMode → Run All*.
 
@@ -78,6 +92,7 @@ Cada cambio importante está documentado como ADR, con el contexto, la decisión
 - [ADR 0001 — Núcleo de reglas independiente de Unity](Docs/adr/0001-nucleo-independiente-de-unity.md)
 - [ADR 0002 — Identidad de jugadores por PlayerId](Docs/adr/0002-identidad-de-jugadores-por-playerid.md)
 - [ADR 0003 — Comandos validados por el Master](Docs/adr/0003-comandos-validados-por-el-master.md)
+- [ADR 0004 — Un único camino para cambiar el estado: eventos + reducer](Docs/adr/0004-un-unico-camino-para-cambiar-el-estado.md)
 
 ### Hoja de ruta
 
@@ -86,7 +101,7 @@ El objetivo es un **Master autoritativo basado en comandos y eventos**:
 1. ✅ Núcleo independiente de Unity, con tests.
 2. ✅ Identidad de jugadores por `PlayerId`.
 3. ✅ Los clientes envían comandos y el Master los valida.
-4. ⬜ El estado se modifica en un único *reducer* que aplican todos a partir de los mismos eventos.
+4. ✅ El estado se modifica en un único *reducer* que aplican todos a partir de los mismos eventos.
 5. ⬜ Las fases de la ronda como máquina de estados explícita (patrón State), sin temporizadores.
 6. ⬜ La presentación consume eventos desde una cola de animaciones.
 

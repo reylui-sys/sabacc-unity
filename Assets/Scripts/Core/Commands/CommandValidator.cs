@@ -17,6 +17,10 @@ public static class CommandValidator
         if (state == null)
             return "La partida aún no ha empezado.";
 
+        // Entre rondas (resultado en pantalla, fin de partida) no se acepta ninguna acción
+        if (!state.IsRoundActive)
+            return "La ronda ha terminado.";
+
         int seat = state.IndexOf(command.Player);
         if (seat < 0)
             return "No participas en esta partida.";
