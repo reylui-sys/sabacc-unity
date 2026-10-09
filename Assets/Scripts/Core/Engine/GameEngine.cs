@@ -87,7 +87,8 @@ public static class GameEngine
     }
 
     /// <summary>
-    /// Cobra las apuestas iniciales y reparte 2 cartas a cada jugador que pueda pagar.
+    /// Cobra las apuestas iniciales y reparte 2 cartas a cada jugador que pueda pagar
+    /// y siga en la sala (quien abandonó no vuelve a recibir cartas).
     /// Si solo puede pagar uno (o ninguno), la partida termina: GameOver.
     /// Requiere un mazo preparado (PrepareDeck).
     /// </summary>
@@ -104,7 +105,7 @@ public static class GameEngine
         for (int i = 0; i < n; i++)
         {
             Player player = state.Players[i];
-            if (player.Credits >= cost)
+            if (player.Credits >= cost && !player.HasLeft)
             {
                 credits[i] = player.Credits - cost;
                 states[i] = PlayerState.Active;
@@ -219,12 +220,16 @@ public static class GameEngine
         }
     }
 
-    /// <summary>Todos los demás se retiraron: el último activo cobra el bote de mano.</summary>
+    /// <summary>
+    /// Todos los demás se retiraron: el último activo cobra el bote de mano.
+    /// Si no queda nadie (todos se fueron a la vez) la ronda termina sin ganador
+    /// y el bote se acumula para la siguiente: nunca se deja la partida parada.
+    /// </summary>
     public static List<GameEvent> PlanLastPlayerStanding(GameState state)
     {
         int winner = FirstActiveSeat(state, requireActive: true);
         if (winner < 0)
-            return new List<GameEvent>();
+            return new List<GameEvent> { new RoundEnded { Outcome = RoundOutcome.LastPlayerStanding, WinnerIndex = -1 } };
 
         return new List<GameEvent>
         {

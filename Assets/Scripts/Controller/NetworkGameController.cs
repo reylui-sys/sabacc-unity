@@ -92,6 +92,13 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
     [Header("Configuracion - Limites")]
     public int maxCardsInHand = 9;
 
+    [Header("Configuracion - Ritmo")]
+    public float actionPause = 1f;            // tras cada accion de apuesta, para que todos la vean
+    public float roundEndReadingTime = 8f;    // tiempo para leer el resultado de la ronda
+    public float gameWinReadingTime = 10f;    // tiempo para leer una victoria definitiva
+    public float presenterTimeout = 20f;      // una animacion que no termina no bloquea la cola
+    public float presentationTimeout = 30f;   // Master: si un jugador no confirma, se sigue sin el
+
     [Header("Paneles")] 
     public GameObject panelReglas;
     public GameObject panelMenu;
@@ -129,6 +136,12 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
     // Solo el Master: azar para barajar y para el shifting (el mazo nunca sale de aqui)
     private readonly System.Random _rng = new System.Random();
 
+    // Solo el Master: la AUTORIDAD. Aplica los eventos en cuanto los decide, sin esperar
+    // a ninguna animacion, y es contra la que se validan los comandos. Es la unica copia
+    // que conoce el mazo. 'gameState' es la VISTA: la tiene cada equipo (el Master
+    // tambien, como un cliente mas) y avanza al ritmo de la cola de presentacion.
+    private GameState _authority;
+
     private const int START_CAMERA_INDEX = 4;
     private const int END_CAMERA_INDEX = 5;
     private const int INTERFERENCE_CAMERA_INDEX = 6;
@@ -159,6 +172,7 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
         ValidateReferences(); // Validar referencias asignadas
         SetupBettingButtons(); // Configurar botones de apuestas
         DisableAllButtons(); // Deshabilitar botones inicialmente
+        StartCoroutine(PresentationLoop()); // Presenta los lotes de eventos en orden, uno detras de otro
 
         // Iniciar musica de fondo
         if (AudioManager.Instance != null)
@@ -219,7 +233,7 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
         _readyActors.Add(actorNumber);
 
         // Inicializar el juego si no esta inicializado
-        if (gameState == null)
+        if (_authority == null)
         {
             InitializeGame();
         }
@@ -230,17 +244,19 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
             _roundStarted = true; // Marcar que la ronda ha comenzado
 
             // Enviar inicializacion a todos: nombres + ActorNumbers en orden de asiento
-            string[] playerNames = new string[gameState.Players.Count];
-            int[] actorNumbers = new int[gameState.Players.Count];
-            for (int i = 0; i < gameState.Players.Count; i++)
+            string[] playerNames = new string[_authority.Players.Count];
+            int[] actorNumbers = new int[_authority.Players.Count];
+            for (int i = 0; i < _authority.Players.Count; i++)
             {
-                playerNames[i] = gameState.Players[i].Name;
-                actorNumbers[i] = gameState.Players[i].Id.Value;
+                playerNames[i] = _authority.Players[i].Name;
+                actorNumbers[i] = _authority.Players[i].Id.Value;
             }
 
-            photonView.RPC("RPC_GameInitialized", RpcTarget.All, playerNames, actorNumbers, startingCredits); // Enviar inicializacion
+            // La primera ronda empieza cuando todos han creado su vista de la partida:
+            // la inicializacion es el lote 0 y cada uno la confirma como cualquier otro
+            _flow.Start(Time.unscaledTimeAsDouble);
 
-            Invoke(nameof(StartNewRound), 1.5f); // Iniciar nueva ronda despues de un delay
+            photonView.RPC(nameof(RPC_GameInitialized), RpcTarget.All, playerNames, actorNumbers, startingCredits); // Enviar inicializacion
         }
     }
 
@@ -363,11 +379,11 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
             return;
         }
         
-        if (gameState != null) // Verificar si el juego ya esta inicializado
+        if (_authority != null) // Verificar si el juego ya esta inicializado
         {
             return;
         }
-        
+
         // Un asiento por jugador, en el orden de PhotonNetwork.PlayerList (ordenada por ActorNumber).
         // Ese orden es el mismo que usa PlayerSpawner para elegir spawn point y camara.
         List<Seat> seats = new List<Seat>();
@@ -377,10 +393,9 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
             seats.Add(new Seat(new PlayerId(player.ActorNumber), nickname));
         }
 
-        gameState = new GameState(seats, startingCredits); // Crear nuevo estado del juego
-        localPlayerIndex = ResolveLocalPlayerIndex(); // El Master ignora RPC_GameInitialized, asi que lo resuelve aqui
-
-        HideUnusedPlayerUI(seats.Count); // Ocultar UI de jugadores no activos
+        // La autoridad. La vista del Master (gameState) la crea RPC_GameInitialized,
+        // igual que en los demas equipos
+        _authority = new GameState(seats, startingCredits);
     }
 
     // Busca el asiento del jugador local por su PlayerId (ActorNumber)
@@ -417,13 +432,13 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
     }
 
     [PunRPC]
-    void RPC_GameInitialized(string[] playerNames, int[] actorNumbers, int credits)
+    void RPC_GameInitialized(string[] playerNames, int[] actorNumbers, int credits, PhotonMessageInfo info)
     {
-        if (gameState != null)
+        if (!IsFromMaster(info) || gameState != null)
         {
             return;
         }
-        
+
         // Reconstruir los mismos asientos que el Master, en el mismo orden
         List<Seat> seats = new List<Seat>();
         for (int i = 0; i < playerNames.Length && i < actorNumbers.Length; i++)
@@ -438,35 +453,42 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
         
         UpdateUI();
         gameStateText.text = "Juego inicializado. Esperando inicio de ronda...";
+
+        // Confirmar el lote 0: este equipo ya puede recibir la primera ronda
+        photonView.RPC(nameof(RPC_PresentationDone), RpcTarget.MasterClient, 0);
     }
 
-    //  EVENTOS: el Master decide, todos aplican
+    //  EVENTOS: el Master decide, todos aplican y lo ven al mismo ritmo
     //
-    //  El estado de la partida SOLO cambia en GameReducer.Apply, y siempre a partir de
-    //  eventos que decide el Master (GameEngine). El Master no aplica nada por su cuenta:
-    //  recibe sus propios eventos por RPC_ApplyEvents igual que los clientes.
-    //  Tras aplicar cada evento, Present(evento) lanza la parte visual (animaciones,
-    //  textos, sonidos) y, en el Master, las reacciones de flujo (siguiente fase...).
+    //  1. El Master decide (GameEngine / GameFlow), aplica el lote a su AUTORIDAD y lo
+    //     envia numerado a todos (RPC_ApplyEvents), el mismo incluido.
+    //  2. Cada equipo lo pone en su COLA DE PRESENTACION. La cola saca un lote, aplica
+    //     cada evento a la VISTA (GameReducer.Apply) y espera a que termine su
+    //     animacion (Present) antes de pasar al siguiente. Los lotes no se pisan.
+    //  3. Al terminar un lote, el equipo se lo confirma al Master (RPC_PresentationDone).
+    //  4. El Master da el siguiente paso automatico de la partida (GameFlow) solo cuando
+    //     TODOS han confirmado el ultimo lote: una BARRERA (FlowCoordinator). Si alguien
+    //     no confirma en 'presentationTimeout' segundos, se sigue sin el.
+    //
+    //  Asi el ritmo lo marca lo que tarda en verse cada cosa en todos los equipos, y no
+    //  temporizadores del Master calibrados a la duracion de sus propias animaciones.
 
-    private bool _isApplyingEvents = false;
-    private readonly List<List<GameEvent>> _deferredBroadcasts = new List<List<GameEvent>>();
-    private readonly Queue<byte[]> _pendingPayloads = new Queue<byte[]>();
+    private readonly Queue<(int seq, byte[] payload)> _presentationQueue = new Queue<(int seq, byte[] payload)>();
 
-    // Solo el Master: envia eventos a todos (incluido a si mismo)
+    // Solo el Master: pasos automaticos pendientes y la barrera del ultimo lote
+    private readonly FlowCoordinator _flow = new FlowCoordinator();
+    private bool _advancingFlow;
+
+    // Solo el Master: aplica a la autoridad y envia a todos (incluido a si mismo)
     void Broadcast(List<GameEvent> events)
     {
-        if (!PhotonNetwork.IsMasterClient || events == null || events.Count == 0) return;
+        if (!PhotonNetwork.IsMasterClient || _authority == null || events == null || events.Count == 0) return;
 
-        // Un RPC a "All" se ejecuta en el Master al instante. Si ya estamos aplicando
-        // otro lote, este se envia al terminarlo: asi el Master aplica los eventos
-        // exactamente en el mismo orden en que les llegan a los clientes.
-        if (_isApplyingEvents)
-        {
-            _deferredBroadcasts.Add(events);
-            return;
-        }
+        GameReducer.ApplyAll(_authority, events);
 
-        photonView.RPC(nameof(RPC_ApplyEvents), RpcTarget.All, EventCodec.Encode(events));
+        // Apunta el paso automatico que toca despues (se dara pasada la barrera)
+        int seq = _flow.OnBroadcast(_authority, events, Time.unscaledTimeAsDouble);
+        photonView.RPC(nameof(RPC_ApplyEvents), RpcTarget.All, seq, EventCodec.Encode(events));
     }
 
     void Broadcast(GameEvent e)
@@ -475,109 +497,166 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
     }
 
     [PunRPC]
-    void RPC_ApplyEvents(byte[] payload, PhotonMessageInfo info)
+    void RPC_ApplyEvents(int seq, byte[] payload, PhotonMessageInfo info)
     {
         if (!IsFromMaster(info)) return; // solo el Master emite eventos de partida
-
-        // Si aun no tenemos GameState (RPC_GameInitialized en camino), esperar sin perder el orden
-        if (gameState == null || _pendingPayloads.Count > 0)
-        {
-            _pendingPayloads.Enqueue(payload);
-            if (_pendingPayloads.Count == 1)
-                StartCoroutine(ApplyPendingPayloadsWhenReady());
-            return;
-        }
-
-        ApplyPayload(payload);
+        _presentationQueue.Enqueue((seq, payload)); // se aplica y se ve en orden, en PresentationLoop
     }
 
-    IEnumerator ApplyPendingPayloadsWhenReady()
+    // La cola de presentacion. Nunca termina y nunca se para por un error:
+    // un fallo en una animacion se registra y la cola sigue con el siguiente evento.
+    IEnumerator PresentationLoop()
     {
-        float waited = 0f;
-        while (gameState == null && waited < 5f)
+        while (true)
         {
-            yield return null;
-            waited += Time.unscaledDeltaTime;
-        }
+            // Hasta que llegue RPC_GameInitialized no hay vista sobre la que aplicar
+            if (gameState == null || _presentationQueue.Count == 0)
+            {
+                yield return null;
+                continue;
+            }
 
-        if (gameState == null)
-        {
-            Debug.LogError("[RPC_ApplyEvents] Llegaron eventos pero la partida no se inicializo");
-            _pendingPayloads.Clear();
-            yield break;
-        }
+            var (seq, payload) = _presentationQueue.Dequeue();
 
-        while (_pendingPayloads.Count > 0)
-            ApplyPayload(_pendingPayloads.Dequeue());
-    }
+            List<GameEvent> events;
+            try { events = EventCodec.Decode(payload); }
+            catch (Exception ex) { Debug.LogException(ex); events = new List<GameEvent>(); }
 
-    void ApplyPayload(byte[] payload)
-    {
-        List<GameEvent> events = EventCodec.Decode(payload);
-
-        _isApplyingEvents = true;
-        try
-        {
             foreach (GameEvent e in events)
             {
-                GameReducer.Apply(gameState, e); // 1. el modelo (igual en todos)
-                Present(e);                       // 2. lo visual (y reacciones del Master)
+                IEnumerator presentation = null;
+                try
+                {
+                    GameReducer.Apply(gameState, e); // 1. el modelo (igual en todos)
+                    presentation = Present(e);       // 2. lo visual
+                }
+                catch (Exception ex) { Debug.LogException(ex); }
+
+                if (presentation != null)
+                    yield return RunPresenter(e, presentation);
             }
+
+            // 3. este equipo ya ha visto el lote
+            if (PhotonNetwork.InRoom)
+                photonView.RPC(nameof(RPC_PresentationDone), RpcTarget.MasterClient, seq);
+        }
+    }
+
+    // Espera a una animacion, con limite: si se cuelga o lanza una excepcion, se sigue
+    IEnumerator RunPresenter(GameEvent e, IEnumerator presentation)
+    {
+        bool done = false;
+        Coroutine running = null;
+        try { running = StartCoroutine(RunToEnd(presentation, () => done = true)); }
+        catch (Exception ex) { Debug.LogException(ex); done = true; }
+
+        float elapsed = 0f;
+        while (!done && elapsed < presenterTimeout)
+        {
+            elapsed += Time.unscaledDeltaTime;
+            yield return null;
+        }
+
+        if (!done)
+        {
+            Debug.LogWarning($"[Presentacion] {e.Type} no termino en {presenterTimeout}s: se continua");
+            if (running != null) StopCoroutine(running);
+            _isAnimating = false;
+        }
+    }
+
+    IEnumerator RunToEnd(IEnumerator routine, Action onDone)
+    {
+        yield return routine;
+        onDone();
+    }
+
+    static IEnumerator Pause(float seconds)
+    {
+        yield return new WaitForSeconds(seconds);
+    }
+
+    // ===== Solo el Master: la barrera y el siguiente paso =====
+
+    [PunRPC]
+    void RPC_PresentationDone(int seq, PhotonMessageInfo info)
+    {
+        if (!PhotonNetwork.IsMasterClient || info.Sender == null) return;
+
+        _flow.Ack(info.Sender.ActorNumber, seq);
+        TryAdvanceFlow(force: false);
+    }
+
+    // Los que siguen en la sala: quien se va no bloquea la barrera
+    static IEnumerable<int> ActorsInRoom()
+    {
+        foreach (Photon.Realtime.Player p in PhotonNetwork.PlayerList)
+            yield return p.ActorNumber;
+    }
+
+    void TryAdvanceFlow(bool force)
+    {
+        if (!PhotonNetwork.IsMasterClient || _authority == null || _advancingFlow) return;
+        if (!force && !_flow.EveryonePresented(ActorsInRoom())) return;
+
+        _advancingFlow = true;
+        try
+        {
+            // El primer paso pendiente que aun proceda; Broadcast abre una barrera nueva
+            Broadcast(_flow.TakeNextStep(_authority, _rules, _rng, shiftProbability));
         }
         finally
         {
-            _isApplyingEvents = false;
-        }
-
-        // Lo que el Master haya decidido mientras aplicaba se envia ahora, en orden
-        while (_deferredBroadcasts.Count > 0)
-        {
-            List<GameEvent> next = _deferredBroadcasts[0];
-            _deferredBroadcasts.RemoveAt(0);
-            Broadcast(next);
+            _advancingFlow = false;
         }
     }
 
-    // Parte visual de cada evento. El modelo ya esta actualizado cuando se llama.
-    void Present(GameEvent e)
+    // Llamado desde Update: un equipo colgado o muy lento no para la partida de los demas
+    void CheckPresentationTimeout()
+    {
+        if (!PhotonNetwork.IsMasterClient) return;
+
+        double now = Time.unscaledTimeAsDouble;
+        if (!_flow.TimedOut(now, presentationTimeout)) return;
+
+        Debug.LogWarning($"[Master] Sin confirmacion del lote {_flow.LastSeq} tras {presentationTimeout}s " +
+                         $"(actores {string.Join(", ", _flow.Missing(ActorsInRoom()))}): se continua");
+        _flow.RestartTimer(now);
+        TryAdvanceFlow(force: true);
+    }
+
+    // Parte visual de cada evento. El modelo (la vista) ya esta actualizado cuando se llama.
+    // Devuelve la animacion a esperar, o null si no hay nada que esperar.
+    IEnumerator Present(GameEvent e)
     {
         switch (e)
         {
-            case RoundStarted x: PresentRoundStarted(x); break;
-            case PhaseChanged x: PresentPhaseChanged(x); break;
-            case TurnChanged x: PresentTurnChanged(x); break;
-            case PlayerChecked x: PresentPlayerChecked(x); break;
-            case BetPlaced x: PresentBetPlaced(x); break;
-            case BetMatched x: PresentBetMatched(x); break;
-            case PlayerCalled x: PresentPlayerCalled(x); break;
-            case PlayerFolded x: PresentPlayerFolded(x); break;
-            case CardDrawn x: PresentCardDrawn(x); break;
-            case PlayerStood x: PresentPlayerStood(x); break;
-            case CardDiscarded x: PresentCardDiscarded(x); break;
-            case CardProtectionChanged x: PresentCardProtectionChanged(x); break;
-            case CardsShifted x: PresentCardsShifted(x); break;
-            case RoundEnded x: PresentRoundEnded(x); break;
-            case PlayerLeft x: PresentPlayerLeft(x); break;
-            case GameOver x: PresentGameOver(x); break;
-            case GameRestarted x: PresentGameRestarted(x); break;
+            case RoundStarted x: return PresentRoundStarted(x);
+            case PhaseChanged x: return PresentPhaseChanged(x);
+            case TurnChanged x: PresentTurnChanged(x); return null;
+            case PlayerChecked x: return PresentPlayerChecked(x);
+            case BetPlaced x: return PresentBetPlaced(x);
+            case BetMatched x: return PresentBetMatched(x);
+            case PlayerCalled x: return PresentPlayerCalled(x);
+            case PlayerFolded x: return PresentPlayerFolded(x);
+            case CardDrawn x: return PresentCardDrawn(x);
+            case PlayerStood x: return PresentPlayerStood(x);
+            case CardDiscarded x: return PresentCardDiscarded(x);
+            case CardProtectionChanged x: return PresentCardProtectionChanged(x);
+            case CardsShifted x: return PresentCardsShifted(x);
+            case RoundEnded x: return PresentRoundEnded(x);
+            case PlayerLeft x: return PresentPlayerLeft(x);
+            case GameOver x: PresentGameOver(x); return null;
+            case GameRestarted x: return PresentGameRestarted(x);
             default:
                 // PenaltyPaid, PlayerBombedOut, PotAwarded: solo mueven dinero y estado;
                 // el resultado se muestra al llegar RoundEnded
                 UpdateUI();
-                break;
+                return null;
         }
     }
 
-    // Solo el Master: baraja (el mazo nunca sale de aqui) y anuncia la ronda
-    void StartNewRound()
-    {
-        if (!PhotonNetwork.IsMasterClient) return;
-
-        GameEngine.PrepareDeck(gameState, _rng);
-        Broadcast(GameEngine.PlanRoundStart(gameState, _rules));
-    }
-
-    void PresentRoundStarted(RoundStarted e)
+    IEnumerator PresentRoundStarted(RoundStarted e)
     {
         Debug.Log($"[Ronda {e.Round}] Empieza. LocalPlayer: {localPlayerIndex}");
         _awaitingCommandResult = false;
@@ -593,7 +672,7 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
 
         CleanupAllCards();
         UpdateUI();
-        StartCoroutine(ShowDeckAndDeal());
+        yield return ShowDeckAndDeal();
     }
 
     void PresentGameOver(GameOver e)
@@ -707,19 +786,10 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
         }
         
         _isAnimating = false;
-        
-        // Despues del reparto viene la PRIMERA RONDA DE APUESTAS
-        if (PhotonNetwork.IsMasterClient)
-        {
-            Debug.Log("[ShowDeckAndDeal] Master invocando StartFirstBettingPhase...");
-            Invoke(nameof(StartFirstBettingPhase), 1f);
-        }
-    }
-    
-    void StartFirstBettingPhase()
-    {
-        if (!PhotonNetwork.IsMasterClient) return;
-        Broadcast(GameEngine.PlanPhaseStart(gameState, GamePhase.FirstBetting));
+
+        // Un momento con la mano a la vista antes de la primera ronda de apuestas,
+        // que el Master lanzara cuando todos hayan terminado de repartir
+        yield return new WaitForSeconds(1f);
     }
 
     //  SHIFTING 
@@ -728,19 +798,10 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
     [Range(0.2f, 0.33f)]
     public float shiftProbability = 0.25f; // 25% de probabilidad por defecto
 
-    // Solo el Master: decide el shift con el mazo real y lo anuncia
-    void TriggerShift(ShiftKind kind)
+    // El shift lo decide el Master con el mazo real (GameFlow -> GameEngine.PlanShifting)
+    IEnumerator PresentCardsShifted(CardsShifted e)
     {
-        if (!PhotonNetwork.IsMasterClient) return;
-        Broadcast(GameEngine.PlanShifting(gameState, shiftProbability, _rng, kind));
-    }
-
-    void PresentCardsShifted(CardsShifted e)
-    {
-        if (e.Kind == ShiftKind.AfterCall)
-            StartCoroutine(AnimateShiftAndReveal(e));
-        else
-            StartCoroutine(AnimateShifting(e));
+        return e.Kind == ShiftKind.AfterCall ? AnimateShiftAndReveal(e) : AnimateShifting(e);
     }
 
     IEnumerator AnimateShifting(CardsShifted e)
@@ -796,13 +857,6 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
         }
 
         _isAnimating = false;
-
-        // Continuar con la siguiente fase
-        if (PhotonNetwork.IsMasterClient)
-        {
-            GamePhase next = isFirstShift ? GamePhase.Drawing : GamePhase.Reveal;
-            Broadcast(GameEngine.PlanPhaseStart(gameState, next));
-        }
     }
 
     // Anima el cambio de una carta (sin tocar el modelo)
@@ -1183,14 +1237,15 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
     [PunRPC]
     void RPC_SubmitCommand(byte type, int arg, PhotonMessageInfo info)
     {
-        if (!PhotonNetwork.IsMasterClient || gameState == null || info.Sender == null) return;
+        if (!PhotonNetwork.IsMasterClient || _authority == null || info.Sender == null) return;
 
         // La identidad sale del remitente real del mensaje, no de un indice que diga el cliente
         PlayerId sender = new PlayerId(info.Sender.ActorNumber);
         GameCommand command = new GameCommand((CommandType)type, sender, arg);
 
-        // El motor valida y decide; aqui solo se envian sus eventos o el rechazo
-        GameEngine.Result result = GameEngine.Handle(gameState, _rules, command);
+        // El motor valida y decide sobre la autoridad (al dia, sin esperar animaciones);
+        // aqui solo se envian sus eventos o el rechazo
+        GameEngine.Result result = GameEngine.Handle(_authority, _rules, command);
         if (!result.IsValid)
         {
             Debug.Log($"[Master] Comando rechazado: {command} -> {result.Error}");
@@ -1245,18 +1300,15 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
             return;
         }
         
-        // Verificar que el jugador actual esta activo
+        // Si el turno lo tiene alguien que ya no juega (acaba de abandonar), el Master
+        // lo pasara al siguiente: mientras, nadie tiene controles
         Player currentPlayer = gameState.CurrentPlayer;
         if (currentPlayer.State != PlayerState.Active)
         {
-            // Saltar a siguiente jugador activo
-            if (PhotonNetwork.IsMasterClient)
-            {
-                StartCoroutine(ProcessNextBettingTurn());
-            }
+            ShowBettingControls(false);
             return;
         }
-        
+
         UpdateBettingUI();
         
         //   Mostrar mensaje correcto para TODOS los jugadores 
@@ -1404,7 +1456,7 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
         SubmitCommand(CommandType.Check);
     }
     
-    void PresentPlayerChecked(PlayerChecked e)
+    IEnumerator PresentPlayerChecked(PlayerChecked e)
     {
         OnCommandResolved(e.PlayerIndex);
 
@@ -1412,11 +1464,9 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
         if (AudioManager.Instance != null) AudioManager.Instance.PlayCheck();
 
         gameStateText.text = $"{gameState.Players[e.PlayerIndex].Name} paso.";
+        ShowBettingControls(false);
 
-        if (PhotonNetwork.IsMasterClient)
-        {
-            StartCoroutine(ProcessNextBettingTurn());
-        }
+        yield return Pause(actionPause);
     }
 
     public void OnBetButton()
@@ -1439,7 +1489,7 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
         SubmitCommand(CommandType.Bet, betAmount);
     }
     
-    void PresentBetPlaced(BetPlaced e)
+    IEnumerator PresentBetPlaced(BetPlaced e)
     {
         OnCommandResolved(e.PlayerIndex);
 
@@ -1448,11 +1498,9 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
 
         gameStateText.text = $"{gameState.Players[e.PlayerIndex].Name} subio a {gameState.CurrentHighestBet}.";
         UpdateBettingUI();
+        ShowBettingControls(false);
 
-        if (PhotonNetwork.IsMasterClient)
-        {
-            StartCoroutine(ProcessNextBettingTurn());
-        }
+        yield return Pause(actionPause);
     }
 
     public void OnCallButton()
@@ -1464,7 +1512,7 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
         SubmitCommand(amountToCall > 0 ? CommandType.Match : CommandType.Call);
     }
     
-    void PresentBetMatched(BetMatched e)
+    IEnumerator PresentBetMatched(BetMatched e)
     {
         OnCommandResolved(e.PlayerIndex);
 
@@ -1473,14 +1521,12 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
 
         gameStateText.text = $"{gameState.Players[e.PlayerIndex].Name} igualo ({e.Amount}).";
         UpdateBettingUI();
+        ShowBettingControls(false);
 
-        if (PhotonNetwork.IsMasterClient)
-        {
-            StartCoroutine(ProcessNextBettingTurn());
-        }
+        yield return Pause(actionPause);
     }
 
-    void PresentPlayerCalled(PlayerCalled e)
+    IEnumerator PresentPlayerCalled(PlayerCalled e)
     {
         OnCommandResolved(e.PlayerIndex);
 
@@ -1491,17 +1537,8 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
 
         ShowBettingControls(false);
 
-        if (PhotonNetwork.IsMasterClient)
-        {
-            // Hacer shift y revelar
-            StartCoroutine(HandleCallSequence());
-        }
-    }
-
-    IEnumerator HandleCallSequence()
-    {
-        yield return new WaitForSeconds(1.5f);
-        TriggerShift(ShiftKind.AfterCall);
+        // Despues el Master hace el shift y se revela (GameFlow: ShiftAfterCall)
+        yield return Pause(1.5f);
     }
 
     IEnumerator AnimateShiftAndReveal(CardsShifted e)
@@ -1516,12 +1553,6 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
         }
 
         yield return new WaitForSeconds(1f);
-
-        // Ir a revelacion
-        if (PhotonNetwork.IsMasterClient)
-        {
-            Broadcast(GameEngine.PlanPhaseStart(gameState, GamePhase.Reveal));
-        }
     }
 
     public void OnFoldButton()
@@ -1530,7 +1561,7 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
         SubmitCommand(CommandType.Fold);
     }
     
-    void PresentPlayerFolded(PlayerFolded e)
+    IEnumerator PresentPlayerFolded(PlayerFolded e)
     {
         OnCommandResolved(e.PlayerIndex);
         Player player = gameState.Players[e.PlayerIndex];
@@ -1543,20 +1574,10 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
             : $"{player.Name} se retiro.";
 
         UpdateBettingUI();
+        ShowBettingControls(false);
 
-        if (PhotonNetwork.IsMasterClient)
-        {
-            // Si solo queda uno, GameEngine.PlanBettingStep ya termina la ronda
-            StartCoroutine(ProcessNextBettingTurn());
-        }
-    }
-
-    // Solo el Master: tras una accion de apuesta decide que pasa
-    // (siguiente turno, siguiente fase o fin de la ronda si solo queda uno)
-    IEnumerator ProcessNextBettingTurn()
-    {
-        yield return new WaitForSeconds(1f);
-        Broadcast(GameEngine.PlanBettingStep(gameState));
+        // Si solo queda uno, el Master termina la ronda (GameEngine.PlanBettingStep)
+        yield return Pause(actionPause);
     }
 
     void PresentTurnChanged(TurnChanged e)
@@ -1569,7 +1590,7 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
             ShowTransitionScreen();
     }
 
-    void PresentPhaseChanged(PhaseChanged e)
+    IEnumerator PresentPhaseChanged(PhaseChanged e)
     {
         Debug.Log($"[Fase] {e.Phase}");
 
@@ -1599,9 +1620,8 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
                 gameStateText.text = e.Phase == GamePhase.FirstShift ? " PRIMER SHIFT " : " SEGUNDO SHIFT ";
                 UpdateUI();
 
-                // Solo el Master decide el shift (Broadcast lo envia al terminar este lote)
-                if (PhotonNetwork.IsMasterClient)
-                    TriggerShift(e.Phase == GamePhase.FirstShift ? ShiftKind.First : ShiftKind.Second);
+                // El shift lo decide el Master cuando todos han visto este aviso
+                yield return Pause(actionPause);
                 break;
 
             case GamePhase.Drawing:
@@ -1613,7 +1633,7 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
 
             case GamePhase.Reveal:
                 ShowBettingControls(false);
-                StartCoroutine(RevealAllHands());
+                yield return RevealAllHands();
                 break;
 
             default:
@@ -1691,14 +1711,14 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
         SubmitCommand(CommandType.Draw);
     }
 
-    void PresentCardDrawn(CardDrawn e)
+    IEnumerator PresentCardDrawn(CardDrawn e)
     {
         OnCommandResolved(e.PlayerIndex);
 
         // Sonido de robar carta
         if (AudioManager.Instance != null) AudioManager.Instance.PlayCardDeal();
 
-        StartCoroutine(AnimateDrawCardNetwork(e.PlayerIndex, e.CardId));
+        return AnimateDrawCardNetwork(e.PlayerIndex, e.CardId);
     }
 
     IEnumerator AnimateDrawCardNetwork(int playerIndex, string cardId)
@@ -1805,30 +1825,23 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
         SubmitCommand(CommandType.Stand);
     }
 
-    void PresentPlayerStood(PlayerStood e)
+    IEnumerator PresentPlayerStood(PlayerStood e)
     {
         OnCommandResolved(e.PlayerIndex);
 
         gameStateText.text = $"{gameState.Players[e.PlayerIndex].Name} se planta.";
         DisableAllButtons();
 
-        if (AllPlayersStood())
+        if (gameState.AllActivePlayersStood())
         {
-            if (PhotonNetwork.IsMasterClient)
-                Invoke(nameof(AdvanceAfterDrawing), 1.5f);
+            // El Master empieza la segunda ronda de apuestas cuando todos lo han visto
+            yield return Pause(1.5f);
         }
         else
         {
-            Invoke(nameof(ShowTransitionScreen), 1.0f);
+            yield return Pause(actionPause);
+            ShowTransitionScreen(); // turno del siguiente
         }
-    }
-
-    bool AllPlayersStood() => gameState.PlayersStood >= gameState.GetActivePlayerCount();
-
-    void AdvanceAfterDrawing()
-    {
-        if (!PhotonNetwork.IsMasterClient) return;
-        Broadcast(GameEngine.PlanPhaseStart(gameState, GamePhase.SecondBetting));
     }
 
     IEnumerator RevealAllHands()
@@ -1836,19 +1849,12 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
         // Cambiar a camara final (endCamera) para ver todas las manos
         SwitchToCamera(END_CAMERA_INDEX);
 
-        yield return AnimationManager.Instance.RevealAllHands(_cardInstances.ToArray(), () =>
-        {
-            UpdateAllPlayersHandValues();
-
-            // Solo el Master liquida la ronda: penalizaciones y botes (GameEngine.SettleRound).
-            // Antes esas penalizaciones solo se aplicaban en el Master y los clientes veian otros creditos.
-            if (PhotonNetwork.IsMasterClient)
-                Broadcast(GameEngine.SettleRound(gameState, _rules));
-        });
+        // Cuando todos han visto las manos, el Master liquida la ronda (GameFlow: Settle)
+        yield return AnimationManager.Instance.RevealAllHands(_cardInstances.ToArray(), UpdateAllPlayersHandValues);
     }
 
     // El dinero ya se movio con PenaltyPaid/PotAwarded; aqui solo se muestra el resultado
-    void PresentRoundEnded(RoundEnded e)
+    IEnumerator PresentRoundEnded(RoundEnded e)
     {
         ShowBettingControls(false);
 
@@ -1892,10 +1898,11 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
                 break;
 
             default: // LastPlayerStanding
-                mensaje = $"{winnerName} gana {e.AmountWon} creditos!\n" +
-                          "Todos los demas se retiraron.";
+                mensaje = e.WinnerIndex >= 0
+                    ? $"{winnerName} gana {e.AmountWon} creditos!\n" + "Todos los demas se retiraron."
+                    : "No queda nadie en la ronda.\nEl bote pasa a la siguiente.";
                 break;
-        }
+}
 
         MostrarPanelFinal(mensaje);
 
@@ -1903,51 +1910,19 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
             UpdateAllPlayersHandValues();
         UpdateUI();
 
-        if (PhotonNetwork.IsMasterClient)
-        {
-            // Tiempo para leer el mensaje
-            if (isGameWin)
-                StartCoroutine(DelayedRestartGame(10f));
-            else
-                StartCoroutine(DelayedPrepareNextRound(8f));
-        }
+        // Tiempo para leer el resultado. Despues el Master empieza la siguiente ronda,
+        // o reinicia la partida tras una victoria definitiva (GameFlow)
+        yield return Pause(isGameWin ? gameWinReadingTime : roundEndReadingTime);
     }
 
-    IEnumerator DelayedPrepareNextRound(float delay)
-    {
-        yield return new WaitForSeconds(delay);
-        PrepareNextRound();
-    }
-
-    IEnumerator DelayedRestartGame(float delay)
-    {
-        yield return new WaitForSeconds(delay);
-        RestartGame();
-    }
-
-    void RestartGame()
-    {
-        if (!PhotonNetwork.IsMasterClient) return;
-        Broadcast(new GameRestarted { StartingCredits = _rules.StartingCredits });
-    }
-
-    void PresentGameRestarted(GameRestarted e)
+    IEnumerator PresentGameRestarted(GameRestarted e)
     {
         CleanupAllCards();
 
         gameStateText.text = "Nueva partida comenzando...";
         UpdateUI();
 
-        if (PhotonNetwork.IsMasterClient)
-        {
-            StartCoroutine(DelayedStartNewRound(2f));
-        }
-    }
-
-    IEnumerator DelayedStartNewRound(float delay)
-    {
-        yield return new WaitForSeconds(delay);
-        StartNewRound();
+        yield return Pause(2f);
     }
 
     string BuildAllHandsString(int[] handValues, bool[] bombedOut)
@@ -1970,29 +1945,6 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
         }
         
         return result;
-    }
-
-    void PrepareNextRound()
-    {
-        Debug.Log($"[PrepareNextRound] Llamado. IsMaster: {PhotonNetwork.IsMasterClient}");
-        if (!PhotonNetwork.IsMasterClient) return;
-        
-        Debug.Log("[PrepareNextRound] Enviando RPC_CleanupRound");
-        photonView.RPC("RPC_CleanupRound", RpcTarget.All);
-    }
-
-    [PunRPC]
-    void RPC_CleanupRound()
-    {
-        Debug.Log($"[RPC_CleanupRound] Limpiando. IsMaster: {PhotonNetwork.IsMasterClient}");
-        CleanupAllCards();
-
-        if (PhotonNetwork.IsMasterClient)
-        {
-            // El nuevo dealer lo decide GameEngine.PlanRoundStart
-            Debug.Log("[RPC_CleanupRound] Empezando nueva ronda");
-            StartNewRound();
-        }
     }
 
     void UpdateUI()
@@ -2159,7 +2111,9 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
     //  Selección de cartas con teclas 1-9 y shift para cambio de camara
     void Update()
     {
-        // --- Gestión de Shift + cambio de cámara ---
+        CheckPresentationTimeout(); // solo hace algo en el Master
+
+// --- Gestión de Shift + cambio de cámara ---
         if (gameState != null)
         {
             // Solo permitir en fases donde el jugador controla su cámara
@@ -2321,10 +2275,10 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
         SubmitCommand(CommandType.Discard, _selectedCardIndex);
     }
 
-    void PresentCardDiscarded(CardDiscarded e)
+    IEnumerator PresentCardDiscarded(CardDiscarded e)
     {
         OnCommandResolved(e.PlayerIndex);
-        StartCoroutine(AnimateDiscardCard(e.PlayerIndex, e.CardIndex));
+        return AnimateDiscardCard(e.PlayerIndex, e.CardIndex);
     }
 
     IEnumerator AnimateDiscardCard(int playerIndex, int cardIndex)
@@ -2429,15 +2383,14 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
         return count;
     }
 
-    void PresentCardProtectionChanged(CardProtectionChanged e)
+    IEnumerator PresentCardProtectionChanged(CardProtectionChanged e)
     {
         OnCommandResolved(e.PlayerIndex);
 
         // Animar carta al campo de interferencia, o de vuelta a la mano
-        if (e.IsProtected)
-            StartCoroutine(AnimateProtectCard(e.PlayerIndex, e.CardIndex, e.CardId));
-        else
-            StartCoroutine(AnimateUnprotectCard(e.PlayerIndex, e.CardIndex, e.CardId));
+        return e.IsProtected
+            ? AnimateProtectCard(e.PlayerIndex, e.CardIndex, e.CardId)
+            : AnimateUnprotectCard(e.PlayerIndex, e.CardIndex, e.CardId);
     }
 
     IEnumerator AnimateProtectCard(int playerIndex, int cardIndex, string cardId)
@@ -2743,10 +2696,15 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
         StartCoroutine(SalirYLimpiar()); // Todos salen
     }
 
+    private bool _isLeaving = false;
+
     // Coroutine que limpia todo correctamente antes de salir
     IEnumerator SalirYLimpiar()
     {
-        if (panelFinal != null)
+        if (_isLeaving) yield break; // puede pedirse a la vez desde varios sitios
+        _isLeaving = true;
+
+if (panelFinal != null)
             panelFinal.SetActive(false);
         
         // Parar la musica
@@ -2816,39 +2774,33 @@ public class NetworkGameController : MonoBehaviourPunCallbacks
 
         // Todos reciben este callback, pero solo el Master lo convierte en evento:
         // asi el cambio de estado llega a todos por el mismo camino
-        if (gameState == null || !PhotonNetwork.IsMasterClient) return;
+        if (_authority == null || !PhotonNetwork.IsMasterClient) return;
 
-        int leftPlayerIndex = SeatIndexOf(otherPlayer);
-        if (leftPlayerIndex < 0) return;
+        int leftPlayerIndex = _authority.IndexOf(new PlayerId(otherPlayer.ActorNumber));
+        if (leftPlayerIndex < 0 || _authority.Players[leftPlayerIndex].HasLeft) return;
 
-        var events = new List<GameEvent> { new PlayerLeft { PlayerIndex = leftPlayerIndex } };
-
-        // Si era su turno, pasa al siguiente jugador activo
-        if (gameState.CurrentPlayerIndex == leftPlayerIndex)
-        {
-            int next = GameEngine.NextActiveSeat(gameState, leftPlayerIndex);
-            if (next != leftPlayerIndex)
-                events.Add(new TurnChanged { PlayerIndex = next });
-        }
-
-        Broadcast(events);
+        // Si tenia el turno, o solo queda uno, lo resuelve GameFlow (AfterPlayerLeft).
+        // Ya no se le espera en la barrera: solo cuentan los que siguen en la sala.
+        Broadcast(new PlayerLeft { PlayerIndex = leftPlayerIndex });
     }
 
-    void PresentPlayerLeft(PlayerLeft e)
+    IEnumerator PresentPlayerLeft(PlayerLeft e)
     {
         gameStateText.text = $"{gameState.Players[e.PlayerIndex].Name} abandono la partida.";
         UpdateUI();
+        yield return Pause(actionPause);
     }
 
     // Callback cuando cambia el Master Client (si el anterior se fue)
     public override void OnMasterClientSwitched(Photon.Realtime.Player newMasterClient)
     {
         Debug.Log($"[NetworkGameController] Nuevo Master Client: {newMasterClient.NickName}");
-        
-        // Si ahora soy el Master y hay una ronda en curso, continuar
-        if (PhotonNetwork.IsMasterClient && gameState != null && gameState.IsRoundActive)
-        {
-            Debug.Log("[NetworkGameController] Soy el nuevo Master, continuando la partida...");
-        }
+
+        // La autoridad (y el mazo) solo existian en el Master que se ha ido: sin ella la
+        // partida no puede continuar. Antes se quedaba parada; ahora todos vuelven al inicio.
+        // (Migrarla exigiria enviar un snapshot de la autoridad al nuevo Master.)
+        if (gameStateText != null)
+            gameStateText.text = "El anfitrion abandono la partida. Volviendo al inicio...";
+        StartCoroutine(SalirYLimpiar());
     }
 }

@@ -32,6 +32,17 @@ public static class CommandValidator
         if (state.CurrentPlayerIndex != seat)
             return "No es tu turno.";
 
+        // Si los demás se han ido o retirado la ronda está ganada y el Master la
+        // cerrará en cuanto todos vean el último movimiento. Mientras, no se puede
+        // hacer nada (p. ej. retirarse y dejar la ronda sin ningún jugador).
+        if (state.GetActivePlayerCount() <= 1)
+            return "Eres el último jugador en la ronda.";
+
+        // Tras el último en plantarse el turno vuelve a alguien que ya se plantó
+        // mientras todos ven la animación: no puede volver a robar
+        if (state.CurrentPhase == GamePhase.Drawing && player.HasStood)
+            return "Ya te has plantado.";
+
         switch (command.Type)
         {
             case CommandType.Draw:

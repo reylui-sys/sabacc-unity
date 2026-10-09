@@ -48,6 +48,7 @@ public static class GameReducer
                 break;
             case PlayerStood x:
                 state.PlayersStood++;
+                state.Players[x.PlayerIndex].HasStood = true;
                 state.CurrentPlayerIndex = x.NextPlayerIndex;
                 break;
             case CardDiscarded x: ApplyCardDiscarded(state, x); break;
@@ -69,7 +70,10 @@ public static class GameReducer
                 state.IsRoundActive = false;
                 break;
 
-            case PlayerLeft x: state.Players[x.PlayerIndex].Fold(); break;
+            case PlayerLeft x:
+                state.Players[x.PlayerIndex].Fold();
+                state.Players[x.PlayerIndex].HasLeft = true;
+                break;
             case GameOver _: state.IsRoundActive = false; break;
             case GameRestarted x: ApplyGameRestarted(state, x); break;
 
@@ -119,7 +123,10 @@ public static class GameReducer
             {
                 player.ResetBettingRound();
                 if (isDrawing)
+                {
                     player.HasDiscardedThisTurn = false;
+                    player.HasStood = false;
+                }
             }
             state.CurrentHighestBet = 0;
         }

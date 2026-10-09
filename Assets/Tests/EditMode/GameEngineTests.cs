@@ -159,6 +159,23 @@ namespace Sabacc.Core.Tests
             Assert.AreEqual(RoundOutcome.LastPlayerStanding, Single<RoundEnded>(events).Outcome);
         }
 
+        [Test]
+        public void SiNoQuedaNadie_LaRondaTerminaSinGanadorYElBoteSeGuarda()
+        {
+            var state = Game(100, 1, 2, 3);
+            state.IsRoundActive = true;
+            state.HandPot = 60;
+            foreach (Player p in state.Players) p.Fold();
+
+            var events = GameEngine.PlanLastPlayerStanding(state);
+
+            Assert.AreEqual(0, events.OfType<PotAwarded>().Count());
+            Assert.AreEqual(-1, Single<RoundEnded>(events).WinnerIndex);
+            GameReducer.ApplyAll(state, events);
+            Assert.IsFalse(state.IsRoundActive, "La partida no se queda parada");
+            Assert.AreEqual(60, state.HandPot);
+        }
+
         // ===== COMANDOS =====
 
         [Test]

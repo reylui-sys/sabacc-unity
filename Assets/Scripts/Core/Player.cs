@@ -20,6 +20,8 @@ public class Player
     public int TotalBetThisRound; // Total apostado en la ronda actual
     public bool HasActedThisBettingRound; // Si ya actuó en esta ronda de apuestas
     public bool HasDiscardedThisTurn;     // Si ya descartó en su turno de robo (tras descartar solo puede plantarse)
+    public bool HasStood;                 // Si ya se plantó en la fase de robo actual
+    public bool HasLeft;                  // Abandonó la sala: no vuelve a jugar ninguna ronda
 
     // Constructor de la clase Jugador
     public Player(PlayerId id, string name, int credits)
@@ -73,6 +75,7 @@ public class Player
         TotalBetThisRound = 0;
         HasActedThisBettingRound = false;
         HasDiscardedThisTurn = false;
+        HasStood = false;
     }
     
     // Resetea solo las apuestas para nueva ronda de apuestas

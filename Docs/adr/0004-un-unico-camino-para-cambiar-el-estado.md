@@ -1,6 +1,6 @@
 # ADR 0004 — Un único camino para cambiar el estado: eventos + reducer
 
-- **Estado:** aceptada
+- **Estado:** aceptada (ampliada por [ADR 0005](0005-flujo-de-fases-y-barreras-de-presentacion.md))
 - **Fecha:** 2026-10-09
 - **Amplía:** [ADR 0003](0003-comandos-validados-por-el-master.md)
 

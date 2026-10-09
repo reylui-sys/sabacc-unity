@@ -120,6 +120,21 @@ public class GameState
     }
 
     /// <summary>
+    /// ¿Se han plantado todos los que siguen jugando? Se mira jugador a jugador y no
+    /// con PlayersStood porque quien se planta y luego abandona la sala dejaría de
+    /// contar como activo pero seguiría sumado en el contador.
+    /// </summary>
+    public bool AllActivePlayersStood()
+    {
+        foreach (Player player in players)
+        {
+            if (player.State == PlayerState.Active && !player.HasStood)
+                return false;
+        }
+        return true;
+    }
+
+    /// <summary>
     /// true solo en la autoridad (el Master): es quien tiene el mazo real.
     /// Los clientes no conocen el orden del mazo (información oculta), así que
     /// el reducer crea las cartas a partir de su ID en lugar de sacarlas del mazo.

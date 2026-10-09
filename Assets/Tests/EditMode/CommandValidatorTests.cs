@@ -87,6 +87,30 @@ namespace Sabacc.Core.Tests
         }
 
         [Test]
+        public void Rechaza_SiEresElUltimoJugadorEnLaRonda()
+        {
+            // Los demás se fueron: la ronda está ganada y el Master la cerrará.
+            // Si pudiera retirarse, la ronda se quedaría sin nadie.
+            _state.CurrentPhase = GamePhase.SecondBetting;
+            for (int i = 1; i < _state.Players.Count; i++)
+                _state.Players[i].Fold();
+            Invalid(Validate(CommandType.Fold, Ana));
+            Invalid(Validate(CommandType.Check, Ana));
+        }
+
+        [Test]
+        public void Robar_RechazadoSiYaTePlantaste()
+        {
+            // Tras plantarse el último, el turno vuelve a alguien que ya se plantó
+            // mientras todos ven la animación: no puede aprovechar para robar
+            _state.CurrentPhase = GamePhase.Drawing;
+            _state.Players[0].HasStood = true;
+            Invalid(Validate(CommandType.Draw, Ana));
+            Invalid(Validate(CommandType.Stand, Ana));
+            Invalid(Validate(CommandType.Protect, Ana, 0));
+        }
+
+        [Test]
         public void Robar_RechazadoFueraDeLaFaseDeRobo()
         {
             _state.CurrentPhase = GamePhase.FirstBetting;

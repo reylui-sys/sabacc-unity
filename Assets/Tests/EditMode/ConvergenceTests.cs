@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
 using NUnit.Framework;
 
 namespace Sabacc.Core.Tests
@@ -17,6 +16,11 @@ namespace Sabacc.Core.Tests
     ///  - el estado público de los tres es idéntico;
     ///  - el dinero total (créditos + botes) no cambia: nadie lo crea ni lo destruye;
     ///  - en el Master, las 76 cartas siguen existiendo exactamente una vez.
+    ///
+    /// El flujo lo conduce FlowCoordinator (GameFlow + cola de pasos), igual que el Master en red.
+    /// Para reproducir la carrera real (un jugador pulsa mientras los demás aún ven
+    /// la animación anterior), a veces el bot intenta actuar ANTES de que se dé el
+    /// paso pendiente: el validador y las guardas de GameFlow deben impedir el lío.
     /// </summary>
     [TestFixture]
     public class ConvergenceTests
@@ -38,11 +42,28 @@ namespace Sabacc.Core.Tests
             // La simulación solo demuestra algo si de verdad recorre todo el juego
             foreach (GameEventType type in Enum.GetValues(typeof(GameEventType)))
             {
-                if (type == GameEventType.PlayerLeft) continue; // no lo provoca la simulación
+                if (type == GameEventType.PlayerLeft) continue; // lo cubre el test de abandonos
                 Assert.IsTrue(seenEvents.ContainsKey(type), $"La simulación nunca produjo {type}");
             }
             foreach (RoundOutcome outcome in Enum.GetValues(typeof(RoundOutcome)))
                 Assert.IsTrue(seenOutcomes.ContainsKey(outcome), $"La simulación nunca terminó una ronda con {outcome}");
+        }
+
+        [Test]
+        public void ConJugadoresQueAbandonanEnCualquierMomento_TambienConverge()
+        {
+            var seenEvents = new Dictionary<GameEventType, int>();
+            var seenOutcomes = new Dictionary<RoundOutcome, int>();
+
+            for (int seed = 1; seed <= 200; seed++)
+            {
+                int players = 3 + seed % 2; // 3 o 4: al irse uno siguen quedando al menos 2
+                new MatchSimulator(seed, players, null, seenEvents, seenOutcomes, leaveChance: 0.01)
+                    .PlayGame(maxRounds: 8);
+            }
+
+            Assert.IsTrue(seenEvents.ContainsKey(GameEventType.PlayerLeft), "La simulación nunca hizo abandonar a nadie");
+            Assert.IsTrue(seenOutcomes.ContainsKey(RoundOutcome.LastPlayerStanding));
         }
 
         [Test]
@@ -61,12 +82,19 @@ namespace Sabacc.Core.Tests
             private readonly List<GameState> _clients = new List<GameState>();
             private readonly int _totalMoney;
             private int _messages;
+            private readonly FlowCoordinator _flow = new FlowCoordinator();
+            private readonly double _leaveChance;
+            private readonly Queue<string> _recent = new Queue<string>();
+            private bool _gameOver;
+            private int _roundsStarted;
             private readonly Dictionary<GameEventType, int> _seenEvents;
             private readonly Dictionary<RoundOutcome, int> _seenOutcomes;
 
             public MatchSimulator(int seed, int playerCount, int[] actorNumbers = null,
-                Dictionary<GameEventType, int> seenEvents = null, Dictionary<RoundOutcome, int> seenOutcomes = null)
+                Dictionary<GameEventType, int> seenEvents = null, Dictionary<RoundOutcome, int> seenOutcomes = null,
+                double leaveChance = 0)
             {
+                _leaveChance = leaveChance;
                 _seenEvents = seenEvents ?? new Dictionary<GameEventType, int>();
                 _seenOutcomes = seenOutcomes ?? new Dictionary<RoundOutcome, int>();
                 _rng = new Random(seed);
@@ -87,8 +115,13 @@ namespace Sabacc.Core.Tests
                 foreach (GameState client in _clients)
                     GameReducer.ApplyAll(client, EventCodec.Decode(wire));
                 _messages++;
+                _recent.Enqueue(string.Join(", ", events));
+                if (_recent.Count > 8) _recent.Dequeue();
+                _flow.OnBroadcast(_master, events, now: 0);
                 foreach (GameEvent e in events)
                 {
+                    if (e is GameOver) _gameOver = true;
+                    if (e is RoundStarted) _roundsStarted++;
                     _seenEvents[e.Type] = _seenEvents.TryGetValue(e.Type, out int n) ? n + 1 : 1;
                     if (e is RoundEnded ended)
                         _seenOutcomes[ended.Outcome] = _seenOutcomes.TryGetValue(ended.Outcome, out int m) ? m + 1 : 1;
@@ -126,110 +159,81 @@ namespace Sabacc.Core.Tests
 
             private static int Money(GameState s) => s.Players.Sum(p => p.Credits) + s.HandPot + s.SabaccPot;
 
-            private static string Snapshot(GameState s)
-            {
-                var sb = new StringBuilder();
-                sb.Append($"ronda={s.CurrentRound} fase={s.CurrentPhase} turno={s.CurrentPlayerIndex} dealer={s.DealerIndex} ")
-                  .Append($"mano={s.HandPot} sabacc={s.SabaccPot} max={s.CurrentHighestBet} call={s.CallerIndex} ")
-                  .Append($"plantados={s.PlayersStood} activa={s.IsRoundActive}\n");
-                foreach (Player p in s.Players)
-                {
-                    sb.Append($"  {p.Id} {p.State} cr={p.Credits} apuesta={p.CurrentBet} actuo={p.HasActedThisBettingRound} " +
-                              $"descarto={p.HasDiscardedThisTurn} [");
-                    sb.Append(string.Join(" ", p.Hand.GetCards().Select(c => c.GetCardId() + (c.IsProtected() ? "*" : ""))));
-                    sb.Append("]\n");
-                }
-                sb.Append($"  descarte={string.Join(" ", s.DiscardPile.GetCards().Select(c => c.GetCardId()))}\n");
-                return sb.ToString();
-            }
+            private static string Snapshot(GameState s) => TestCards.PublicSnapshot(s);
 
-            // ----- Flujo de partida (lo que hace NetworkGameController en el Master) -----
+            // ----- Flujo de partida: lo conduce GameFlow, igual que en el juego -----
 
             public void PlayGame(int maxRounds)
             {
-                for (int round = 0; round < maxRounds; round++)
+                // Lo primero que hace el Master cuando todos han cargado la partida
+                _flow.Start(now: 0);
+
+                for (int step = 0; step < 20000; step++)
                 {
-                    GameEngine.PrepareDeck(_master, _rng);
-                    var start = GameEngine.PlanRoundStart(_master, _rules);
-                    Broadcast(start);
-                    if (start.OfType<GameOver>().Any())
+                    if (_gameOver)
                         return;
 
-                    RoundEnded ended = PlayRound();
-                    if (ended.Outcome == RoundOutcome.DefinitiveWin)
-                        Broadcast(new GameRestarted { StartingCredits = _rules.StartingCredits });
-                }
-            }
+                    // Alguien cierra el juego (OnPlayerLeftRoom en el Master). Con menos
+                    // de 2 en la sala el juego vuelve al menú, así que siempre quedan 2.
+                    if (_leaveChance > 0 && _rng.NextDouble() < _leaveChance && TryLeave())
+                        continue;
 
-            private RoundEnded PlayRound()
-            {
-                Broadcast(GameEngine.PlanPhaseStart(_master, GamePhase.FirstBetting));
+                    // El jugador en turno actúa; a veces lo intenta aunque haya un paso
+                    // automático pendiente (aún se está viendo la animación anterior)
+                    bool playerTries = _flow.PendingCount == 0 || _rng.Next(4) == 0;
+                    if (playerTries && TryAct())
+                        continue;
 
-                for (int step = 0; step < 2000; step++)
-                {
-                    switch (_master.CurrentPhase)
+                    // Si no, el Master da el siguiente paso automático (pasada la barrera)
+                    if (_flow.PendingCount > 0)
                     {
-                        case GamePhase.FirstBetting:
-                        case GamePhase.Calling:
-                        case GamePhase.SecondBetting:
-                        {
-                            var events = Act(BettingCandidates());
-                            if (events.OfType<PlayerCalled>().Any())
-                            {
-                                Broadcast(GameEngine.PlanShifting(_master, 0.33f, _rng, ShiftKind.AfterCall));
-                                return Reveal();
-                            }
-                            var next = GameEngine.PlanBettingStep(_master);
-                            Broadcast(next);
-                            var lastStanding = next.OfType<RoundEnded>().FirstOrDefault();
-                            if (lastStanding != null)
-                                return lastStanding;
-                            break;
-                        }
-                        case GamePhase.FirstShift:
-                            Broadcast(GameEngine.PlanShifting(_master, 0.33f, _rng, ShiftKind.First));
-                            Broadcast(GameEngine.PlanPhaseStart(_master, GamePhase.Drawing));
-                            break;
-                        case GamePhase.Drawing:
-                            Act(DrawingCandidates());
-                            if (_master.PlayersStood >= _master.GetActivePlayerCount())
-                                Broadcast(GameEngine.PlanPhaseStart(_master, GamePhase.SecondBetting));
-                            break;
-                        case GamePhase.SecondShift:
-                            Broadcast(GameEngine.PlanShifting(_master, 0.33f, _rng, ShiftKind.Second));
-                            return Reveal();
-                        default:
-                            Assert.Fail($"Fase inesperada en la simulación: {_master.CurrentPhase}");
-                            break;
+                        FlowAction action = _flow.PeekNext;
+                        bool startsRound = action == FlowAction.StartRound || action == FlowAction.NextRound;
+                        if (startsRound && _roundsStarted >= maxRounds)
+                            return;
+
+                        // Los pasos que ya no proceden (guardas) se descartan solos
+                        Broadcast(_flow.TakeNextStep(_master, _rules, _rng, 0.33f));
+                        continue;
                     }
+
+                    Assert.Fail($"Partida parada en {_master.CurrentPhase}: ni paso automático ni acción válida del jugador en turno\n" +
+                                $"Últimos lotes:\n{string.Join("\n", _recent)}\n{Snapshot(_master)}");
                 }
-                Assert.Fail("La ronda no terminó: posible bucle en el flujo de fases");
-                return null;
+                Assert.Fail("La partida no termina: posible bucle en el flujo");
             }
 
-            private RoundEnded Reveal()
+            private bool TryLeave()
             {
-                Broadcast(GameEngine.PlanPhaseStart(_master, GamePhase.Reveal));
-                var settlement = GameEngine.SettleRound(_master, _rules);
-                Broadcast(settlement);
-                return settlement.OfType<RoundEnded>().Single();
+                var inRoom = Enumerable.Range(0, _master.Players.Count).Where(i => !_master.Players[i].HasLeft).ToList();
+                if (inRoom.Count <= 2)
+                    return false;
+                Broadcast(new PlayerLeft { PlayerIndex = inRoom[_rng.Next(inRoom.Count)] });
+                return true;
             }
 
             // ----- Bots: eligen al azar entre las acciones que el validador permite -----
 
-            private List<GameEvent> Act(List<(CommandType type, int arg)> candidates)
+            private bool TryAct()
             {
+                List<(CommandType type, int arg)> candidates;
+                if (CommandValidator.IsBettingPhase(_master.CurrentPhase))
+                    candidates = BettingCandidates();
+                else if (_master.CurrentPhase == GamePhase.Drawing)
+                    candidates = DrawingCandidates();
+                else
+                    return false;
+
                 PlayerId current = _master.Players[_master.CurrentPlayerIndex].Id;
                 var valid = candidates
                     .Select(c => GameEngine.Handle(_master, _rules, new GameCommand(c.type, current, c.arg)))
                     .Where(r => r.IsValid)
                     .ToList();
+                if (valid.Count == 0)
+                    return false;
 
-                Assert.IsTrue(valid.Count > 0, $"El jugador en turno no tiene ninguna acción válida en {_master.CurrentPhase}");
-
-                var chosen = valid[_rng.Next(valid.Count)].Events;
-                Broadcast(chosen);
-                return chosen;
+                Broadcast(valid[_rng.Next(valid.Count)].Events);
+                return true;
             }
 
             private List<(CommandType, int)> BettingCandidates()
